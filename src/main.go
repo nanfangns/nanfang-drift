@@ -18,6 +18,8 @@ func main() {
 	switch os.Args[1] {
 	case "serve":
 		cmdServe()
+	case "tun":
+		cmdTUNEntry()
 	case "sub":
 		cmdSub()
 	case "list-nodes":
@@ -35,25 +37,30 @@ func printUsage() {
 	fmt.Println(`nanfang v1.0.0 - aero_v2 proxy client
 
 Usage:
-  nanfang serve [options]     Start SOCKS5 proxy server
+  nanfang serve [options]     Start SOCKS5/HTTP proxy server
+  nanfang tun [options]       Start TUN mode (captures all traffic)
   nanfang sub <url>           Fetch nodes from subscription
   nanfang list-nodes          List cached nodes
   nanfang test <node_id>      Test connection to a node
   nanfang version             Print version
 
 Serve options:
-  --listen <addr>             Listen address (default: 127.0.0.1:1080)
+  --listen <addr>             Listen address (default: 127.0.0.1:7890)
   --node-id <id>              Use single node by ID
   --nodes-file <path>         Load nodes from JSON file
 
+TUN options:
+  --nodes-file <path>         Load nodes from JSON file
+
 Examples:
-  nanfang serve --nodes-file nodes.json --listen 127.0.0.1:1080
+  nanfang serve --nodes-file nodes.json --listen 127.0.0.1:7890
+  nanfang tun --nodes-file nodes.json
   nanfang sub "https://example.com/api/v1/client/subscribe?token=xxx&flag=aero"
   nanfang test 7`)
 }
 
 func cmdServe() {
-	listenAddr := "127.0.0.1:1080"
+	listenAddr := "127.0.0.1:7890"
 	nodesFile := ""
 	singleNodeID := 0
 
@@ -129,6 +136,47 @@ func cmdServe() {
 
 	if err := serveProxy(listenAddr, nodes); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func cmdTUNEntry() {
+	nodesFile := ""
+
+	for i := 2; i < len(os.Args); i++ {
+		switch os.Args[i] {
+		case "--nodes-file":
+			i++
+			if i < len(os.Args) {
+				nodesFile = os.Args[i]
+			}
+		}
+	}
+
+	var nodes []AeroNode
+
+	if nodesFile != "" {
+		data, err := os.ReadFile(nodesFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error reading nodes file: %v\n", err)
+			os.Exit(1)
+		}
+		if err := json.Unmarshal(data, &nodes); err != nil {
+			fmt.Fprintf(os.Stderr, "Error parsing nodes file: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Loaded %d nodes from %s\n", len(nodes), nodesFile)
+	} else {
+		nodes = loadDefaultNodes()
+	}
+
+	if len(nodes) == 0 {
+		fmt.Fprintf(os.Stderr, "No aero_v2 nodes found\n")
+		os.Exit(1)
+	}
+
+	if err := cmdTUN(nodes); err != nil {
+		fmt.Fprintf(os.Stderr, "TUN error: %v\n", err)
 		os.Exit(1)
 	}
 }

@@ -16,10 +16,7 @@ from urllib.request import urlopen, Request
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 NANFANG_EXE = os.path.join(BASE_DIR, "nanfang.exe")
 NODES_FILE = os.path.join(BASE_DIR, "nodes.json")
-DEFAULT_SUB_URL = (
-    "https://64.186.238.186:8443/api/v1/client/subscribe"
-    "?token=61488c7d4f8cbe22c1808de058c0ec98&flag=aero&tz=8&lang=zh_CN&skip_srs=1"
-)
+SETTINGS_FILE = os.path.join(BASE_DIR, "settings.json")
 PROXY_PORT = 7890  # nanfang mixed proxy port (HTTP CONNECT + SOCKS5)
 PROXY_KEY = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
 
@@ -436,15 +433,20 @@ class NodeList(tk.Frame):
     def set_nodes(self, nodes):
         self.nodes = nodes
         self.latencies = {}
+        self.selected_idx = -1
         self.listbox.delete(0, tk.END)
         for node in nodes:
             name = node.get("name", "Node")
             self.listbox.insert(tk.END, f"  {name}")
-        if nodes:
-            self.listbox.selection_set(0)
-            self.selected_idx = 0
-            if self.on_select:
-                self.on_select(0)
+
+    def set_selection(self, idx):
+        if 0 <= idx < len(self.nodes):
+            self._updating = True
+            self.listbox.selection_clear(0, tk.END)
+            self.listbox.selection_set(idx)
+            self.listbox.see(idx)
+            self.selected_idx = idx
+            self._updating = False
 
     def set_latency(self, idx, value):
         self.latencies[idx] = value
@@ -494,6 +496,7 @@ class NanfangApp:
         self.nodes = []
         self.selected_idx = 0
         self.current_mode = None
+        self.settings = self._load_settings()
 
         self._load_nodes_from_file()
         self._build_ui()
@@ -502,13 +505,15 @@ class NanfangApp:
         self._status_pulse_running = True
         self._pulse_tick()
 
-        # Auto-select first node after UI is ready
+        # Restore saved node selection, or select first node
         if self.nodes:
             self.node_list.set_nodes(self.nodes)
-            self.selected_idx = 0
-            node = self.nodes[0]
+            saved_id = self.settings.get("selected_node_id")
+            idx = self._find_node_idx(saved_id) if saved_id is not None else 0
+            self.selected_idx = idx
+            self.node_list.set_selection(idx)
+            node = self.nodes[idx]
             self.info_var.set(f"已选: {node.get('name', '?')} (ID:{node.get('node_id', '?')})")
-            # Start latency measurement in background
             self._measure_latencies()
 
     def _build_ui(self):
@@ -535,7 +540,8 @@ class NanfangApp:
         tk.Label(sub_frame, text="订阅链接", fg=FG_DIM, bg=BG_CARD,
                  font=("Microsoft YaHei", 9), anchor="w").pack(fill=tk.X)
 
-        self.url_var = tk.StringVar(value=DEFAULT_SUB_URL)
+        saved_url = self.settings.get("subscription_url", "")
+        self.url_var = tk.StringVar(value=saved_url)
         url_entry = tk.Entry(sub_frame, textvariable=self.url_var,
                              bg=BG_INPUT, fg=FG_TEXT, insertbackground=FG_TEXT,
                              font=("Consolas", 9), relief="flat", bd=0,
@@ -612,13 +618,37 @@ class NanfangApp:
         if 0 <= idx < len(self.nodes):
             node = self.nodes[idx]
             name = node.get("name", "?")
-            with open(os.path.join(BASE_DIR, "debug.log"), "a", encoding="utf-8") as f:
-                f.write(f"[{time.strftime('%H:%M:%S')}] Node click: idx={idx} name={name} node_id={node.get('node_id')}\n")
             self.info_var.set(f"已选: {name} (ID:{node.get('node_id', '?')})")
+            self._save_settings("selected_node_id", node.get("node_id"))
 
             # Auto-restart proxy with new node if currently running
             if self.current_mode and self.process:
                 self._restart_proxy()
+
+    # ── Settings persistence ──
+
+    def _load_settings(self):
+        if os.path.exists(SETTINGS_FILE):
+            try:
+                with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return {}
+
+    def _save_settings(self, key, value):
+        self.settings[key] = value
+        try:
+            with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+                json.dump(self.settings, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    def _find_node_idx(self, node_id):
+        for i, n in enumerate(self.nodes):
+            if n.get("node_id") == node_id:
+                return i
+        return 0
 
     def _load_nodes_from_file(self):
         if os.path.exists(NODES_FILE):
@@ -633,10 +663,17 @@ class NanfangApp:
     def _load_nodes(self):
         self._load_nodes_from_file()
         self.node_list.set_nodes(self.nodes)
-        self.info_var.set(f"已加载 {len(self.nodes)} 个节点")
         self.status_var.set("本地已加载")
         if self.nodes:
+            saved_id = self.settings.get("selected_node_id")
+            idx = self._find_node_idx(saved_id) if saved_id is not None else 0
+            self.selected_idx = idx
+            self.node_list.set_selection(idx)
+            node = self.nodes[idx]
+            self.info_var.set(f"已选: {node.get('name', '?')} (ID:{node.get('node_id', '?')})")
             self._measure_latencies()
+        else:
+            self.info_var.set("无节点")
 
     def _measure_latencies(self):
         """Show node ID as identifier since all nodes share one edge server."""
@@ -712,7 +749,17 @@ class NanfangApp:
         self.btn_local.set_enabled()
         self.status_var.set(f"成功: {len(nodes)} 个节点")
         if nodes:
-            self.selected_idx = 0
+            # Save the URL that was used
+            url = self.url_var.get().strip()
+            if url:
+                self._save_settings("subscription_url", url)
+            # Restore saved selection or default to first
+            saved_id = self.settings.get("selected_node_id")
+            idx = self._find_node_idx(saved_id) if saved_id is not None else 0
+            self.selected_idx = idx
+            self.node_list.set_selection(idx)
+            node = self.nodes[idx]
+            self.info_var.set(f"已选: {node.get('name', '?')} (ID:{node.get('node_id', '?')})")
             self._measure_latencies()
 
     def _on_fetch_fail(self, err):
@@ -783,6 +830,19 @@ class NanfangApp:
             except:
                 self.process.kill()
             self.process = None
+            # Give wintun driver time to clean up adapter state
+            time.sleep(1)
+
+    def _cleanup_tun_routes(self):
+        """Remove TUN routes that were added by nanfang."""
+        tun_gw = "10.0.0.1"
+        try:
+            subprocess.run(["route", "delete", "0.0.0.0", "mask", "128.0.0.0", tun_gw],
+                           capture_output=True, timeout=5)
+            subprocess.run(["route", "delete", "128.0.0.0", "mask", "128.0.0.0", tun_gw],
+                           capture_output=True, timeout=5)
+        except Exception:
+            pass
 
     def _set_buttons_busy(self):
         """Disable all action buttons during startup."""
@@ -864,11 +924,60 @@ class NanfangApp:
             self.info_var.set(f"切换失败: {e}")
 
     def _toggle_tun(self):
-        messagebox.showinfo("提示", "TUN 模式暂未实现，请使用系统代理模式")
+        """Start TUN mode — captures all system traffic."""
+        if self.current_mode == "tun":
+            # Already in TUN mode, do nothing (use stop button)
+            return
+
+        if not self.nodes:
+            messagebox.showerror("错误", "没有节点，请先拉取订阅")
+            return
+        if not os.path.exists(NANFANG_EXE):
+            messagebox.showerror("错误", f"找不到: {NANFANG_EXE}")
+            return
+
+        idx = max(0, min(self.selected_idx, len(self.nodes) - 1))
+        node = self.nodes[idx]
+        name = node.get("name", "?")
+
+        self._set_buttons_busy()
+        self._stop_nanfang()
+
+        try:
+            cmd = [NANFANG_EXE, "tun", "--nodes-file", NODES_FILE]
+            with open(os.path.join(BASE_DIR, "debug.log"), "a", encoding="utf-8") as f:
+                f.write(f"[{time.strftime('%H:%M:%S')}] Starting TUN: {' '.join(cmd)}\n")
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            si.wShowWindow = 0
+            self.process = subprocess.Popen(
+                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                startupinfo=si, cwd=BASE_DIR,
+            )
+        except Exception as e:
+            self._set_buttons_idle()
+            messagebox.showerror("错误", str(e))
+            return
+
+        def _after_delay():
+            if not self._check_nanfang_alive():
+                self._set_buttons_idle()
+                messagebox.showerror("错误", "TUN 模式启动失败，请检查 wintun.dll 是否存在")
+                return
+            self.current_mode = "tun"
+            self._set_buttons_idle()
+            self.info_var.set(f"TUN 模式已开启 | {name}")
+            self.status_dot.set_color(ACCENT_GREEN)
+            self.ticker.set_status(f"● TUN 模式运行中 — 捕获所有流量", ACCENT_GREEN)
+
+        self.root.after(2000, _after_delay)
 
     def _stop(self):
+        was_tun = self.current_mode == "tun"
         self._stop_nanfang()
         clear_system_proxy()
+        if was_tun:
+            self._cleanup_tun_routes()
 
         self.current_mode = None
         self.btn_sys.set_normal("系统代理")
