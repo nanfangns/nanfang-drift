@@ -950,8 +950,9 @@ class NanfangApp:
             si = subprocess.STARTUPINFO()
             si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             si.wShowWindow = 0
+            tun_log = open(os.path.join(BASE_DIR, "tun.log"), "w", encoding="utf-8")
             self.process = subprocess.Popen(
-                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                cmd, stdout=tun_log, stderr=subprocess.STDOUT,
                 startupinfo=si, cwd=BASE_DIR,
             )
         except Exception as e:

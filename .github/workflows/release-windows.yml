@@ -1,0 +1,56 @@
+name: release-windows
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.3"
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Build Go core
+        working-directory: src
+        run: go build -o ..\nanfang-core.exe .
+
+      - name: Flutter pub get
+        working-directory: flutter_app
+        run: flutter pub get
+
+      - name: Build Windows app
+        working-directory: flutter_app
+        run: flutter build windows --release
+
+      - name: Assemble bundle
+        shell: pwsh
+        run: |
+          $bundle = "flutter_app/build/windows/x64/runner/Release"
+          Copy-Item -LiteralPath "nanfang-core.exe" -Destination (Join-Path $bundle "nanfang-core.exe") -Force
+          Compress-Archive -Path (Join-Path $bundle "*") -DestinationPath "nanfang-windows.zip" -Force
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nanfang-windows
+          path: nanfang-windows.zip
+
+      - name: Publish release asset
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: nanfang-windows.zip

@@ -1,17 +1,35 @@
-# Compiled binaries
-nanfang.exe
+# Compiled binaries / release outputs
 *.exe
-wintun.dll
+*.dll
+*.so
+*.dylib
+dist/
+release/
 
 # Runtime / generated files
 nodes.json
+settings.json
 debug.log
+tun.log
 cache.db
 geoip.metadb
 __pycache__/
 configs/
 
-# Unused directories
+# Python
+*.pyc
+
+# Go / Rust build output
 bin/
-flutter_app/
-rust_core/
+rust_core/target/
+rust_core/.git.local-backup-*/
+
+# Flutter / IDE build output
+flutter_app/.dart_tool/
+flutter_app/build/
+flutter_app/.flutter-plugins-dependencies
+flutter_app/.idea/
+flutter_app/android/local.properties
+flutter_app/macos/Flutter/ephemeral/
+flutter_app/windows/flutter/ephemeral/
+flutter_app/linux/flutter/ephemeral/

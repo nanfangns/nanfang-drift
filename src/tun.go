@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -288,6 +289,9 @@ func connKey(srcIP, dstIP net.IP, srcPort, dstPort uint16) string {
 func cmdTUN(nodes []AeroNode) error {
 	fmt.Println("Starting TUN mode...")
 
+	// Resolve edge server IPs BEFORE setting up TUN routes (so DNS works normally)
+	edgeServerIPs := resolveEdgeServers(nodes)
+
 	// Create wintun adapter with random name to avoid stale adapter conflicts
 	rnd := make([]byte, 4)
 	rand.Read(rnd)
@@ -315,11 +319,12 @@ func cmdTUN(nodes []AeroNode) error {
 		fmt.Printf("TUN adapter: %s\n", ifaceName)
 	}
 
-	// Configure adapter IP via netsh
+	// Configure adapter IP via netsh (delay briefly for adapter to settle)
+	time.Sleep(500 * time.Millisecond)
 	setupTUNAdapter(ifaceName)
 
 	// Setup routes
-	setupTUNRoutes(ifaceName)
+	setupTUNRoutes(ifaceName, edgeServerIPs)
 
 	// Handle Ctrl+C: cleanup routes and close adapter
 	sigCh := make(chan os.Signal, 1)
@@ -689,15 +694,14 @@ func findWintunInterface() string {
 	if err != nil {
 		return ""
 	}
-	// Look for the adapter name that matches our TUN
+	// netsh output columns: admin_status status type interface_name
+	// We look for our "nanfang-" prefixed adapter and return the LAST field
 	lines := splitLines(string(out))
 	for _, line := range lines {
 		if contains(line, "nanfang") || contains(line, "Wintun") {
-			// Extract interface name (first column after status)
 			parts := splitFields(line)
 			if len(parts) >= 4 {
-				// Format: "enabled  connected  nanfang  Dedicated"
-				return parts[2]
+				return parts[len(parts)-1] // last column is interface name
 			}
 		}
 	}
@@ -754,26 +758,66 @@ func containsSubstr(s, substr string) bool {
 }
 
 func setupTUNAdapter(ifaceName string) {
-	// Set IP address on the TUN adapter
 	ip := tunAddrStr
-	mask := tunMaskStr
-	gw := tunGWStr
 
-	cmds := [][]string{
-		{"netsh", "interface", "ip", "set", "address", ifaceName, "static", ip, mask, gw},
-		{"netsh", "interface", "ip", "set", "dns", ifaceName, "static", "8.8.8.8"},
+	// Use PowerShell to set IP — netsh has argument escaping issues when called from Go
+	// Adding DefaultGateway here so Windows auto-creates the default route for us (metric ~5)
+	psCmd := fmt.Sprintf(
+		"New-NetIPAddress -InterfaceAlias '%s' -IPAddress %s -PrefixLength 30 -DefaultGateway %s -ErrorAction SilentlyContinue",
+		ifaceName, ip, tunGWStr)
+	c := exec.Command("powershell", "-NoProfile", "-Command", psCmd)
+	out, err := c.CombinedOutput()
+	if err != nil {
+		fmt.Printf("PowerShell IP config error: %v, output: %s\n", err, string(out))
 	}
 
-	for _, args := range cmds {
-		c := exec.Command(args[0], args[1:]...)
-		c.Run() // ignore errors — adapter may already be configured
+	// Verify the IP was set
+	verify := exec.Command("powershell", "-NoProfile", "-Command",
+		fmt.Sprintf("(Get-NetIPAddress -InterfaceAlias '%s' -AddressFamily IPv4).IPAddress", ifaceName))
+	if vout, err := verify.CombinedOutput(); err == nil {
+		fmt.Printf("Adapter IP: %s\n", strings.TrimSpace(string(vout)))
 	}
 }
 
-func setupTUNRoutes(ifaceName string) {
-	// Route all traffic through TUN
-	exec.Command("route", "add", "0.0.0.0", "mask", "128.0.0.0", tunGWStr, "metric", "5").Run()
-	exec.Command("route", "add", "128.0.0.0", "mask", "128.0.0.0", tunGWStr, "metric", "5").Run()
+// resolveEdgeServers extracts unique edge server IPs from the node list.
+// This must be called BEFORE TUN routes are set up so DNS resolution works normally.
+func resolveEdgeServers(nodes []AeroNode) []string {
+	seen := map[string]bool{}
+	var ips []string
+	for _, n := range nodes {
+		if n.Server == "" || seen[n.Server] {
+			continue
+		}
+		seen[n.Server] = true
+		// Try direct IP parse first
+		if net.ParseIP(n.Server) != nil {
+			ips = append(ips, n.Server)
+			continue
+		}
+		// Resolve hostname
+		if resolved, err := net.LookupHost(n.Server); err == nil {
+			for _, ip := range resolved {
+				if !seen[ip] {
+					seen[ip] = true
+					ips = append(ips, ip)
+				}
+			}
+			fmt.Printf("Resolved %s -> %v\n", n.Server, resolved)
+		} else {
+			fmt.Printf("Warning: cannot resolve %s: %v\n", n.Server, err)
+		}
+	}
+	return ips
+}
+
+func setupTUNRoutes(ifaceName string, edgeServerIPs []string) {
+	gw := detectPhysicalGateway()
+	if gw == "" {
+		fmt.Println("Warning: could not detect physical gateway, traffic may not route correctly")
+	}
+
+	// PowerShell New-NetIPAddress already added the default route via TUN (low metric).
+	// We only need to add exclusion routes and edge server routes through physical gateway.
 
 	// Exclude local networks (so we don't capture our own traffic)
 	excludes := []struct{ net, mask string }{
@@ -786,12 +830,16 @@ func setupTUNRoutes(ifaceName string) {
 		exec.Command("route", "add", ex.net, "mask", ex.mask, "0.0.0.0").Run()
 	}
 
-	// Route DNS servers through physical gateway (not TUN)
-	// so our UDP socket can reach them directly
-	gw := detectPhysicalGateway()
+	// Route DNS servers AND edge servers through physical gateway (not TUN)
 	if gw != "" {
+		// DNS servers — our UDP socket needs to reach them directly
 		for _, dns := range []string{"8.8.8.8", "8.8.4.4", "1.1.1.1", "1.0.0.1"} {
 			exec.Command("route", "add", dns, "mask", "255.255.255.255", gw).Run()
+		}
+		// Edge server — net.Dial in OpenAeroTunnel must not loop through TUN
+		for _, ip := range edgeServerIPs {
+			fmt.Printf("Edge server route: %s -> %s (physical)\n", ip, gw)
+			exec.Command("route", "add", ip, "mask", "255.255.255.255", gw).Run()
 		}
 	}
 }
@@ -805,20 +853,19 @@ func detectPhysicalGateway() string {
 	lines := splitLines(string(out))
 	for _, line := range lines {
 		parts := splitFields(line)
-		// Look for a route to 0.0.0.0 with a gateway (not 0.0.0.0 and not 10.0.0.1)
-		if len(parts) >= 3 && parts[0] == "0.0.0.0" && parts[1] != "0.0.0.0" && parts[1] != tunGWStr {
-			return parts[1]
+		// Route table format: destination netmask gateway interface metric
+		// We need parts[2] (gateway), not parts[1] (netmask)
+		if len(parts) >= 3 && parts[0] == "0.0.0.0" && parts[2] != "0.0.0.0" && parts[2] != tunGWStr {
+			return parts[2]
 		}
 	}
 	return ""
 }
 
 func stopTUNRoutes() {
-	exec.Command("route", "delete", "0.0.0.0", "mask", "128.0.0.0", tunGWStr).Run()
-	exec.Command("route", "delete", "128.0.0.0", "mask", "128.0.0.0", tunGWStr).Run()
-	// Clean up DNS routes
-	for _, dns := range []string{"8.8.8.8", "8.8.4.4", "1.1.1.1", "1.0.0.1"} {
-		exec.Command("route", "delete", dns, "mask", "255.255.255.255").Run()
+	// Remove DNS and edge server routes we added
+	for _, ip := range []string{"8.8.8.8", "8.8.4.4", "1.1.1.1", "1.0.0.1"} {
+		exec.Command("route", "delete", ip, "mask", "255.255.255.255").Run()
 	}
 }
 
