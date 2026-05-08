@@ -13,7 +13,10 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from urllib.request import urlopen, Request
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if getattr(sys, "frozen", False):
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 NODES_FILE = os.path.join(BASE_DIR, "nodes.json")
 SETTINGS_FILE = os.path.join(BASE_DIR, "settings.json")
 PROXY_PORT = 7890  # nanfang mixed proxy port (HTTP CONNECT + SOCKS5)
