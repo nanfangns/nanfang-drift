@@ -14,11 +14,18 @@ from tkinter import ttk, messagebox
 from urllib.request import urlopen, Request
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-NANFANG_EXE = os.path.join(BASE_DIR, "nanfang.exe")
 NODES_FILE = os.path.join(BASE_DIR, "nodes.json")
 SETTINGS_FILE = os.path.join(BASE_DIR, "settings.json")
 PROXY_PORT = 7890  # nanfang mixed proxy port (HTTP CONNECT + SOCKS5)
 PROXY_KEY = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+
+
+def get_core_exe():
+    for name in ("nanfang-core.exe", "nanfang.exe"):
+        path = os.path.join(BASE_DIR, name)
+        if os.path.exists(path):
+            return path
+    return os.path.join(BASE_DIR, "nanfang-core.exe")
 
 # ── Colors ──────────────────────────────────────────────
 BG_DARK = "#1a1a2e"
@@ -773,8 +780,9 @@ class NanfangApp:
         if not self.nodes:
             messagebox.showerror("错误", "没有节点，请先拉取订阅")
             return False
-        if not os.path.exists(NANFANG_EXE):
-            messagebox.showerror("错误", f"找不到: {NANFANG_EXE}")
+        core_exe = get_core_exe()
+        if not os.path.exists(core_exe):
+            messagebox.showerror("错误", f"找不到核心文件: {core_exe}")
             return False
 
         self._stop_nanfang()
@@ -788,7 +796,7 @@ class NanfangApp:
             f.write(f"[{time.strftime('%H:%M:%S')}] _start_nanfang: selected_idx={idx} name={name} node_id={node_id}\n")
 
         try:
-            cmd = [NANFANG_EXE, "serve", "--nodes-file", NODES_FILE,
+            cmd = [core_exe, "serve", "--nodes-file", NODES_FILE,
                    "--node-id", str(node_id), "--listen", f"127.0.0.1:{PROXY_PORT}"]
             with open(os.path.join(BASE_DIR, "debug.log"), "a", encoding="utf-8") as f:
                 f.write(f"[{time.strftime('%H:%M:%S')}] Starting: {' '.join(cmd)}\n")
@@ -910,7 +918,7 @@ class NanfangApp:
         name = node.get("name", "?")
 
         try:
-            cmd = [NANFANG_EXE, "serve", "--nodes-file", NODES_FILE,
+            cmd = [get_core_exe(), "serve", "--nodes-file", NODES_FILE,
                    "--node-id", str(node_id), "--listen", f"127.0.0.1:{PROXY_PORT}"]
             si = subprocess.STARTUPINFO()
             si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
@@ -932,8 +940,9 @@ class NanfangApp:
         if not self.nodes:
             messagebox.showerror("错误", "没有节点，请先拉取订阅")
             return
-        if not os.path.exists(NANFANG_EXE):
-            messagebox.showerror("错误", f"找不到: {NANFANG_EXE}")
+        core_exe = get_core_exe()
+        if not os.path.exists(core_exe):
+            messagebox.showerror("错误", f"找不到核心文件: {core_exe}")
             return
 
         idx = max(0, min(self.selected_idx, len(self.nodes) - 1))
@@ -944,7 +953,7 @@ class NanfangApp:
         self._stop_nanfang()
 
         try:
-            cmd = [NANFANG_EXE, "tun", "--nodes-file", NODES_FILE]
+            cmd = [core_exe, "tun", "--nodes-file", NODES_FILE]
             with open(os.path.join(BASE_DIR, "debug.log"), "a", encoding="utf-8") as f:
                 f.write(f"[{time.strftime('%H:%M:%S')}] Starting TUN: {' '.join(cmd)}\n")
             si = subprocess.STARTUPINFO()

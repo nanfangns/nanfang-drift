@@ -5,6 +5,9 @@
 *.dylib
 dist/
 release/
+build/
+dist-py/
+*.spec
 
 # Runtime / generated files
 nodes.json
