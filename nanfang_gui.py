@@ -737,7 +737,11 @@ class NanfangApp:
             try:
                 req = Request(url, headers={"User-Agent": "nanfang/1.0"})
                 ctx = __import__("ssl")._create_unverified_context()
-                with urlopen(req, timeout=15, context=ctx) as resp:
+                opener = __import__("urllib.request").request.build_opener(
+                    __import__("urllib.request").request.ProxyHandler({}),
+                    __import__("urllib.request").request.HTTPSHandler(context=ctx),
+                )
+                with opener.open(req, timeout=15) as resp:
                     data = json.loads(resp.read())
                 nodes = [n for n in data if n.get("type") == "aero_v2"]
                 self.nodes = nodes
