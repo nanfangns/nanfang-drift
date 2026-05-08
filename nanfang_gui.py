@@ -5,6 +5,7 @@ Lively, animated interface with smooth transitions.
 import json
 import math
 import os
+import queue
 import subprocess
 import sys
 import threading
@@ -507,6 +508,8 @@ class NanfangApp:
         self.selected_idx = 0
         self.current_mode = None
         self.settings = self._load_settings()
+        self.fetch_queue = queue.Queue()
+        self.fetch_in_progress = False
 
         self._load_nodes_from_file()
         self._build_ui()
@@ -731,6 +734,7 @@ class NanfangApp:
         if not url:
             messagebox.showerror("错误", "请输入订阅链接")
             return
+        self.fetch_in_progress = True
         self.status_var.set("拉取中...")
         self.spinner.start()
         self.btn_fetch.set_loading("拉取中...")
@@ -747,14 +751,31 @@ class NanfangApp:
                 with opener.open(req, timeout=15) as resp:
                     data = json.loads(resp.read())
                 nodes = [n for n in data if n.get("type") == "aero_v2"]
-                self.nodes = nodes
-                with open(NODES_FILE, "w", encoding="utf-8") as f:
-                    json.dump(nodes, f, ensure_ascii=False, indent=2)
-                self.root.after(0, lambda: self._on_fetch_ok(nodes))
+                self.fetch_queue.put(("ok", nodes))
             except Exception as e:
-                self.root.after(0, lambda: self._on_fetch_fail(str(e)))
+                self.fetch_queue.put(("err", str(e)))
 
         threading.Thread(target=do_fetch, daemon=True).start()
+
+        self.root.after(100, self._poll_fetch_result)
+
+    def _poll_fetch_result(self):
+        try:
+            status, payload = self.fetch_queue.get_nowait()
+        except queue.Empty:
+            if self.fetch_in_progress:
+                self.root.after(100, self._poll_fetch_result)
+            return
+
+        self.fetch_in_progress = False
+        if status == "ok":
+            nodes = payload
+            self.nodes = nodes
+            with open(NODES_FILE, "w", encoding="utf-8") as f:
+                json.dump(nodes, f, ensure_ascii=False, indent=2)
+            self._on_fetch_ok(nodes)
+        else:
+            self._on_fetch_fail(payload)
 
     def _on_fetch_ok(self, nodes):
         self.spinner.stop()
