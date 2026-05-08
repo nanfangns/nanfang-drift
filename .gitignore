@@ -1,0 +1,17 @@
+# Compiled binaries
+nanfang.exe
+*.exe
+wintun.dll
+
+# Runtime / generated files
+nodes.json
+debug.log
+cache.db
+geoip.metadb
+__pycache__/
+configs/
+
+# Unused directories
+bin/
+flutter_app/
+rust_core/
