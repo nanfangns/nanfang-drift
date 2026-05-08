@@ -680,7 +680,7 @@ class NanfangApp:
         threading.Thread(target=_do_test, daemon=True).start()
 
     def _fetch_nodes(self):
-        url = self.url_var.get().strip()
+        url = self.url_var.get().replace(" ", "").strip()
         if not url:
             messagebox.showerror("错误", "请输入订阅链接")
             return
