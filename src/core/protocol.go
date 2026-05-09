@@ -20,13 +20,24 @@ const (
 )
 
 type AeroNode struct {
-	ID       int    `json:"node_id"`
-	Server   string `json:"server"`
-	Port     int    `json:"server_port"`
-	Password string `json:"password"`
-	EdgePSK  string `json:"aero_v2_edge_psk"`
-	AEADKey  string `json:"aero_v2_aead_key"`
-	Name     string `json:"name"`
+	Type         string `json:"type"`
+	ID           int    `json:"node_id"`
+	Server       string `json:"server"`
+	Port         int    `json:"server_port"`
+	ServerIP     string `json:"server_ip,omitempty"`
+	Password     string `json:"password"`
+	EdgePSK      string `json:"aero_v2_edge_psk,omitempty"`
+	AEADKey      string `json:"aero_v2_aead_key,omitempty"`
+	AuthID       int    `json:"auth_id,omitempty"`
+	UDPPort      int    `json:"udp_port,omitempty"`
+	MTU          int    `json:"mtu,omitempty"`
+	IPLCMode     bool   `json:"iplc_mode,omitempty"`
+	UDPLaneMode  string `json:"udp_lane_mode,omitempty"`
+	ResumeTicket string `json:"resume_ticket,omitempty"`
+	ResumeTTL    int    `json:"resume_ttl_sec,omitempty"`
+	SNI          string `json:"sni,omitempty"`
+	PoolSize     int    `json:"pool_size,omitempty"`
+	Name         string `json:"name"`
 }
 
 func sha256Prefix16(s string) []byte {

@@ -14,11 +14,21 @@ type SubscriptionResponse struct {
 	Name         string `json:"name"`
 	Server       string `json:"server"`
 	ServerPort   int    `json:"server_port"`
+	ServerIP     string `json:"server_ip"`
 	Type         string `json:"type"`
 	Password     string `json:"password"`
 	EdgePSK      string `json:"aero_v2_edge_psk"`
 	AEADKey      string `json:"aero_v2_aead_key"`
+	AuthID       int    `json:"auth_id"`
+	UDPPort      int    `json:"udp_port"`
+	MTU          int    `json:"mtu"`
+	IPLCMode     bool   `json:"iplc_mode"`
+	UDPLaneMode  string `json:"udp_lane_mode"`
+	SNI          string `json:"sni"`
+	PoolSize     int    `json:"pool_size"`
 	ResumeTicket string `json:"aero_v2_resume_ticket,omitempty"`
+	ResumeTicket2 string `json:"resume_ticket,omitempty"`
+	ResumeTTLSec int    `json:"resume_ttl_sec,omitempty"`
 }
 
 type SubscriptionInfo struct {
@@ -67,17 +77,32 @@ func FetchSubscription(rawURL string) ([]AeroNode, error) {
 
 	nodes := make([]AeroNode, 0, len(rawNodes))
 	for _, rn := range rawNodes {
-		if rn.Type != "aero_v2" {
+		if rn.Type != "aero_v2" && rn.Type != "anytls" && rn.Type != "aero" && rn.Type != "morph" {
 			continue
 		}
+		resumeTicket := rn.ResumeTicket
+		if resumeTicket == "" {
+			resumeTicket = rn.ResumeTicket2
+		}
 		nodes = append(nodes, AeroNode{
-			ID:       rn.NodeID,
-			Server:   rn.Server,
-			Port:     rn.ServerPort,
-			Password: rn.Password,
-			EdgePSK:  rn.EdgePSK,
-			AEADKey:  rn.AEADKey,
-			Name:     rn.Name,
+			Type:         rn.Type,
+			ID:           rn.NodeID,
+			Server:       rn.Server,
+			Port:         rn.ServerPort,
+			ServerIP:     rn.ServerIP,
+			Password:     rn.Password,
+			EdgePSK:      rn.EdgePSK,
+			AEADKey:      rn.AEADKey,
+			AuthID:       rn.AuthID,
+			UDPPort:      rn.UDPPort,
+			MTU:          rn.MTU,
+			IPLCMode:     rn.IPLCMode,
+			UDPLaneMode:  rn.UDPLaneMode,
+			ResumeTicket: resumeTicket,
+			ResumeTTL:    rn.ResumeTTLSec,
+			SNI:          rn.SNI,
+			PoolSize:     rn.PoolSize,
+			Name:         rn.Name,
 		})
 	}
 
