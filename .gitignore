@@ -45,7 +45,14 @@ flutter_app/windows/flutter/ephemeral/
 flutter_app/linux/flutter/ephemeral/
 
 # Android generated artifacts
-android/
+android/build/
+android/ui_dump.xml
+android/debug.keystore
+android/mobile/*.class
+android/*.aar
+android/*.jar
+android/*.apk
+android/*.idsig
 *.aar
 *.jar
 *.apk
