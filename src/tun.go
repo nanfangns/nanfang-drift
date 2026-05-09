@@ -1,9 +1,12 @@
+//go:build windows
+
 package main
 
 import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
+	"nanfang/core"
 	"net"
 	"os"
 	"os/exec"
@@ -286,7 +289,7 @@ func connKey(srcIP, dstIP net.IP, srcPort, dstPort uint16) string {
 	return fmt.Sprintf("%s:%d-%s:%d", srcIP, srcPort, dstIP, dstPort)
 }
 
-func cmdTUN(nodes []AeroNode) error {
+func cmdTUN(nodes []core.AeroNode) error {
 	fmt.Println("Starting TUN mode...")
 
 	// Resolve edge server IPs BEFORE setting up TUN routes (so DNS works normally)
@@ -362,7 +365,7 @@ func cmdTUN(nodes []AeroNode) error {
 	}
 }
 
-func handleTUNPacket(pkt []byte, session *wintunSession, nodes []AeroNode) {
+func handleTUNPacket(pkt []byte, session *wintunSession, nodes []core.AeroNode) {
 	// Parse IP header
 	if pkt[0]>>4 != 4 {
 		return // not IPv4
@@ -424,8 +427,8 @@ func handleTUNPacket(pkt []byte, session *wintunSession, nodes []AeroNode) {
 			return // duplicate SYN
 		}
 
-		node := pickNode(nodes)
-		tunnel, err := OpenAeroTunnel(&node, dstIP.String(), int(dstPort))
+		node := core.PickNode(nodes)
+		tunnel, err := core.OpenAeroTunnel(&node, dstIP.String(), int(dstPort))
 		if err != nil {
 			fmt.Printf("TUN: tunnel %s:%d via %s failed: %v\n", dstIP, dstPort, node.Name, err)
 			return
@@ -781,7 +784,7 @@ func setupTUNAdapter(ifaceName string) {
 
 // resolveEdgeServers extracts unique edge server IPs from the node list.
 // This must be called BEFORE TUN routes are set up so DNS resolution works normally.
-func resolveEdgeServers(nodes []AeroNode) []string {
+func resolveEdgeServers(nodes []core.AeroNode) []string {
 	seen := map[string]bool{}
 	var ips []string
 	for _, n := range nodes {

@@ -1,4 +1,4 @@
-package main
+package core
 
 import (
 	"crypto/hmac"
@@ -11,7 +11,6 @@ import (
 	"time"
 )
 
-// aero_v2 protocol constants
 const (
 	aeroMagicAC2 = "AC2"
 	aeroMagicAT2 = "AT2"
@@ -51,11 +50,9 @@ func randBytes(n int) []byte {
 
 func buildAC2Extension(node *AeroNode, ts int64, rand12 []byte) []byte {
 	prefix := sha256Prefix16(node.Password)
-
-	// AC2 header: magic(3) + \0 + version(1) + nodeID(2) + prefix16(16) + timestamp(8) + rand12(12) = 43 bytes
 	header := make([]byte, 0, 43)
 	header = append(header, aeroMagicAC2...)
-	header = append(header, 0) // null separator
+	header = append(header, 0)
 	header = append(header, aeroVersion)
 	header = append(header, byte(node.ID>>8), byte(node.ID))
 	header = append(header, prefix...)
@@ -63,13 +60,10 @@ func buildAC2Extension(node *AeroNode, ts int64, rand12 []byte) []byte {
 	binary.BigEndian.PutUint64(tsBytes, uint64(ts))
 	header = append(header, tsBytes...)
 	header = append(header, rand12...)
-
-	// HMAC-SHA256(edgePSK, header)[:16]
 	edgePSK := hexDecode(node.EdgePSK)
 	mac := hmac.New(sha256.New, edgePSK)
 	mac.Write(header)
 	auth := mac.Sum(nil)[:16]
-
 	return append(header, auth...)
 }
 
@@ -79,44 +73,35 @@ func buildClientHello(node *AeroNode) ([]byte, int64) {
 	rand12 := randBytes(12)
 	ts := time.Now().Unix()
 
-	// supported_groups: x25519
 	extGroups := []byte{0x00, 0x0a, 0x00, 0x04, 0x00, 0x02, 0x00, 0x1d}
-
-	// AC2 extension: type(2) + len(2) + blob
 	ac2Blob := buildAC2Extension(node, ts, rand12)
 	ac2Ext := make([]byte, 4, 4+len(ac2Blob))
-	binary.BigEndian.PutUint16(ac2Ext[0:2], 0xFFA5) // extension type
+	binary.BigEndian.PutUint16(ac2Ext[0:2], 0xFFA5)
 	binary.BigEndian.PutUint16(ac2Ext[2:4], uint16(len(ac2Blob)))
 	ac2Ext = append(ac2Ext, ac2Blob...)
-
 	extensions := append(extGroups, ac2Ext...)
-
-	// Cipher suites with length prefix: count(2) + TLS_AES_128_GCM_SHA256(0x1301) + TLS_CHACHA20_POLY1305_SHA256(0x1303)
 	cipherSuites := []byte{0x00, 0x04, 0x13, 0x01, 0x13, 0x03}
 
-	// ClientHello body
 	body := make([]byte, 0, 512)
-	body = append(body, 0x03, 0x03) // legacy_version = TLS 1.2
+	body = append(body, 0x03, 0x03)
 	body = append(body, tlsRandom...)
 	body = append(body, byte(len(sessionID)))
 	body = append(body, sessionID...)
 	body = append(body, cipherSuites...)
-	body = append(body, 0x01, 0x00) // compression: null
+	body = append(body, 0x01, 0x00)
 	bExtLen := make([]byte, 2)
 	binary.BigEndian.PutUint16(bExtLen, uint16(len(extensions)))
 	body = append(body, bExtLen...)
 	body = append(body, extensions...)
 
-	// Handshake header: type(1) + length(3)
 	hsBody := make([]byte, 4)
-	hsBody[0] = 1 // ClientHello
+	hsBody[0] = 1
 	copy(hsBody[1:4], []byte{byte(len(body) >> 16), byte(len(body) >> 8), byte(len(body))})
 	hsBody = append(hsBody, body...)
 
-	// TLS record: type(1) + version(2) + length(2)
 	record := make([]byte, 5)
 	record[0] = tlsTypeHS
-	binary.BigEndian.PutUint16(record[1:3], 0x0303) // TLS 1.2
+	binary.BigEndian.PutUint16(record[1:3], 0x0303)
 	binary.BigEndian.PutUint16(record[3:5], uint16(len(hsBody)))
 	record = append(record, hsBody...)
 
@@ -127,10 +112,9 @@ func buildAT2Frame(node *AeroNode, host string, port int, payload []byte) []byte
 	prefix := sha256Prefix16(node.Password)
 	hostBytes := []byte(host)
 
-	// AT2 body: magic(3) + \0 + version(1) + prefix16(16) + hostLen(2) + host + port(2) + payloadLen(2) + payload
 	body := make([]byte, 0, 24+len(hostBytes)+len(payload))
 	body = append(body, aeroMagicAT2...)
-	body = append(body, 0) // null
+	body = append(body, 0)
 	body = append(body, aeroVersion)
 	body = append(body, prefix...)
 	bHostLen := make([]byte, 2)
@@ -145,10 +129,9 @@ func buildAT2Frame(node *AeroNode, host string, port int, payload []byte) []byte
 	body = append(body, bPayloadLen...)
 	body = append(body, payload...)
 
-	// TLS ApplicationData record
 	record := make([]byte, 5)
 	record[0] = tlsTypeApp
-	binary.BigEndian.PutUint16(record[1:3], 0x0303) // TLS 1.2
+	binary.BigEndian.PutUint16(record[1:3], 0x0303)
 	binary.BigEndian.PutUint16(record[3:5], uint16(len(body)))
 	record = append(record, body...)
 
@@ -174,51 +157,43 @@ func recvTLSRecord(r io.Reader) ([]byte, error) {
 	return append(hdr, body...), nil
 }
 
-// AeroTunnel wraps a TCP connection for aero_v2 relay.
-// After the AC2 handshake + AT2 connect, data flows as raw TCP.
 type AeroTunnel struct {
 	conn net.Conn
 }
 
-func (t *AeroTunnel) Read(p []byte) (int, error)            { return t.conn.Read(p) }
-func (t *AeroTunnel) Write(p []byte) (int, error)           { return t.conn.Write(p) }
-func (t *AeroTunnel) Close() error                          { return t.conn.Close() }
-func (t *AeroTunnel) LocalAddr() net.Addr                   { return t.conn.LocalAddr() }
-func (t *AeroTunnel) RemoteAddr() net.Addr                  { return t.conn.RemoteAddr() }
-func (t *AeroTunnel) SetDeadline(d time.Time) error         { return t.conn.SetDeadline(d) }
-func (t *AeroTunnel) SetReadDeadline(d time.Time) error     { return t.conn.SetReadDeadline(d) }
-func (t *AeroTunnel) SetWriteDeadline(d time.Time) error    { return t.conn.SetWriteDeadline(d) }
+func (t *AeroTunnel) Read(p []byte) (int, error)         { return t.conn.Read(p) }
+func (t *AeroTunnel) Write(p []byte) (int, error)        { return t.conn.Write(p) }
+func (t *AeroTunnel) Close() error                        { return t.conn.Close() }
+func (t *AeroTunnel) LocalAddr() net.Addr                 { return t.conn.LocalAddr() }
+func (t *AeroTunnel) RemoteAddr() net.Addr                { return t.conn.RemoteAddr() }
+func (t *AeroTunnel) SetDeadline(d time.Time) error       { return t.conn.SetDeadline(d) }
+func (t *AeroTunnel) SetReadDeadline(d time.Time) error   { return t.conn.SetReadDeadline(d) }
+func (t *AeroTunnel) SetWriteDeadline(d time.Time) error  { return t.conn.SetWriteDeadline(d) }
 
-// OpenAeroTunnel establishes an aero_v2 connection and returns an AeroTunnel.
-// Protocol: ClientHello (with AC2) -> ServerHello -> AT2 connect frame -> raw TCP relay.
 func OpenAeroTunnel(node *AeroNode, targetHost string, targetPort int) (net.Conn, error) {
 	conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", node.Server, node.Port), 10*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("dial: %w", err)
 	}
 
-	// Send ClientHello with AC2 extension
 	hello, _ := buildClientHello(node)
 	if _, err := conn.Write(hello); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("send hello: %w", err)
 	}
 
-	// Receive server response (ServerHello)
 	_, err = recvTLSRecord(conn)
 	if err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("recv server: %w", err)
 	}
 
-	// Send AT2 connect frame (payload=nil tells server to open tunnel to target)
 	at2 := buildAT2Frame(node, targetHost, targetPort, nil)
 	if _, err := conn.Write(at2); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("send at2: %w", err)
 	}
 
-	conn.SetDeadline(time.Time{}) // clear any deadline
-
+	conn.SetDeadline(time.Time{})
 	return &AeroTunnel{conn: conn}, nil
 }

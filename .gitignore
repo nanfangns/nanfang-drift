@@ -8,6 +8,13 @@ release/
 build/
 dist-py/
 *.spec
+dist-fetch/
+_verify_v*/
+_pyinstall_test/
+tooling/
+tmp_fetch_source.py
+nodes_test_fetch.json
+ps_sub.json
 
 # Runtime / generated files
 nodes.json
@@ -36,3 +43,10 @@ flutter_app/android/local.properties
 flutter_app/macos/Flutter/ephemeral/
 flutter_app/windows/flutter/ephemeral/
 flutter_app/linux/flutter/ephemeral/
+
+# Android generated artifacts
+android/
+*.aar
+*.jar
+*.apk
+*.idsig

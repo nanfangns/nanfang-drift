@@ -1,4 +1,4 @@
-package main
+package core
 
 import (
 	"crypto/tls"
@@ -28,7 +28,7 @@ type SubscriptionInfo struct {
 	Expire   int64
 }
 
-func fetchSubscription(rawURL string) ([]AeroNode, error) {
+func FetchSubscription(rawURL string) ([]AeroNode, error) {
 	tlsConfig := &tls.Config{
 		InsecureSkipVerify: true,
 		NextProtos:         []string{},

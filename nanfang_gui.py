@@ -10,9 +10,11 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import tkinter as tk
 from tkinter import ttk, messagebox
 from urllib.request import urlopen, Request
+import socket
 
 if getattr(sys, "frozen", False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -22,10 +24,35 @@ NODES_FILE = os.path.join(BASE_DIR, "nodes.json")
 SETTINGS_FILE = os.path.join(BASE_DIR, "settings.json")
 PROXY_PORT = 7890  # nanfang mixed proxy port (HTTP CONNECT + SOCKS5)
 PROXY_KEY = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+DEBUG_LOG = os.path.join(BASE_DIR, "debug.log")
+
+
+def log_debug(message):
+    try:
+        with open(DEBUG_LOG, "a", encoding="utf-8") as f:
+            f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}\n")
+    except Exception:
+        pass
+
+
+def _handle_uncaught(exc_type, exc_value, exc_tb):
+    log_debug("UNCAUGHT: " + "".join(traceback.format_exception(exc_type, exc_value, exc_tb)))
+    try:
+        messagebox.showerror("错误", str(exc_value))
+    except Exception:
+        pass
+
+
+sys.excepthook = _handle_uncaught
+
+if hasattr(threading, "excepthook"):
+    def _threading_excepthook(args):
+        _handle_uncaught(args.exc_type, args.exc_value, args.exc_traceback)
+    threading.excepthook = _threading_excepthook
 
 
 def get_core_exe():
-    for name in ("nanfang-core.exe", "nanfang.exe"):
+    for name in ("nanfang-core.exe", "nanfang.exe", os.path.join("_internal", "nanfang-core.exe")):
         path = os.path.join(BASE_DIR, name)
         if os.path.exists(path):
             return path
@@ -73,6 +100,88 @@ def clear_system_proxy():
         ctypes.windll.wininet.InternetSetOptionW(0, 37, 0, 0)
     except:
         pass
+
+
+def get_proxy_candidates():
+    candidates = []
+
+    for key in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
+        value = os.environ.get(key)
+        if value and value not in candidates:
+            candidates.append(value)
+
+    try:
+        import winreg
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, PROXY_KEY, 0, winreg.KEY_READ)
+        enabled, _ = winreg.QueryValueEx(key, "ProxyEnable")
+        if enabled:
+            proxy_server, _ = winreg.QueryValueEx(key, "ProxyServer")
+            if proxy_server:
+                if "=" in proxy_server:
+                    for item in proxy_server.split(";"):
+                        if "=" in item:
+                            _, addr = item.split("=", 1)
+                            if addr and not addr.startswith("http://"):
+                                addr = "http://" + addr
+                            if addr and addr not in candidates:
+                                candidates.append(addr)
+                else:
+                    addr = proxy_server
+                    if not addr.startswith("http://"):
+                        addr = "http://" + addr
+                    if addr not in candidates:
+                        candidates.append(addr)
+        winreg.CloseKey(key)
+    except Exception:
+        pass
+
+    for proxy in ("http://127.0.0.1:7890", "http://127.0.0.1:7892"):
+        try:
+            host = "127.0.0.1"
+            port = int(proxy.rsplit(":", 1)[1])
+            with socket.create_connection((host, port), timeout=0.5):
+                if proxy not in candidates:
+                    candidates.append(proxy)
+        except Exception:
+            pass
+
+    return candidates
+
+
+def fetch_subscription_with_fallback(url):
+    req = Request(url, headers={"User-Agent": "nanfang/1.0"})
+    ctx = __import__("ssl")._create_unverified_context()
+
+    attempts = [
+        ("direct", __import__("urllib.request").request.build_opener(
+            __import__("urllib.request").request.ProxyHandler({}),
+            __import__("urllib.request").request.HTTPSHandler(context=ctx),
+        ))
+    ]
+
+    for proxy in get_proxy_candidates():
+        attempts.append((
+            f"proxy {proxy}",
+            __import__("urllib.request").request.build_opener(
+                __import__("urllib.request").request.ProxyHandler({
+                    "http": proxy,
+                    "https": proxy,
+                }),
+                __import__("urllib.request").request.HTTPSHandler(context=ctx),
+            )
+        ))
+
+    last_error = None
+    for label, opener in attempts:
+        try:
+            log_debug(f"fetch try via {label}")
+            with opener.open(req, timeout=15) as resp:
+                return json.loads(resp.read())
+        except Exception as e:
+            last_error = e
+            log_debug(f"fetch fail via {label}: {e!r}")
+
+    raise last_error or RuntimeError("fetch failed")
 
 
 def lerp_color(c1, c2, t):
@@ -742,14 +851,7 @@ class NanfangApp:
 
         def do_fetch():
             try:
-                req = Request(url, headers={"User-Agent": "nanfang/1.0"})
-                ctx = __import__("ssl")._create_unverified_context()
-                opener = __import__("urllib.request").request.build_opener(
-                    __import__("urllib.request").request.ProxyHandler({}),
-                    __import__("urllib.request").request.HTTPSHandler(context=ctx),
-                )
-                with opener.open(req, timeout=15) as resp:
-                    data = json.loads(resp.read())
+                data = fetch_subscription_with_fallback(url)
                 nodes = [n for n in data if n.get("type") == "aero_v2"]
                 self.fetch_queue.put(("ok", nodes))
             except Exception as e:

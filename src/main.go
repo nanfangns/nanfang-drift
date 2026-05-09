@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"nanfang/core"
 	"os"
 	"strconv"
 )
@@ -84,7 +85,7 @@ func cmdServe() {
 		}
 	}
 
-	var nodes []AeroNode
+	var nodes []core.AeroNode
 
 	if nodesFile != "" {
 		data, err := os.ReadFile(nodesFile)
@@ -96,9 +97,8 @@ func cmdServe() {
 			fmt.Fprintf(os.Stderr, "Error parsing nodes file: %v\n", err)
 			os.Exit(1)
 		}
-		// Filter by node-id if specified
 		if singleNodeID > 0 {
-			filtered := make([]AeroNode, 0)
+			filtered := make([]core.AeroNode, 0)
 			for _, n := range nodes {
 				if n.ID == singleNodeID {
 					filtered = append(filtered, n)
@@ -113,7 +113,7 @@ func cmdServe() {
 		fmt.Printf("Loaded %d nodes from %s\n", len(nodes), nodesFile)
 	} else if singleNodeID > 0 {
 		nodes = loadDefaultNodes()
-		filtered := make([]AeroNode, 0)
+		filtered := make([]core.AeroNode, 0)
 		for _, n := range nodes {
 			if n.ID == singleNodeID {
 				filtered = append(filtered, n)
@@ -134,49 +134,8 @@ func cmdServe() {
 		os.Exit(1)
 	}
 
-	if err := serveProxy(listenAddr, nodes); err != nil {
+	if err := core.ServeProxy(listenAddr, nodes); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-}
-
-func cmdTUNEntry() {
-	nodesFile := ""
-
-	for i := 2; i < len(os.Args); i++ {
-		switch os.Args[i] {
-		case "--nodes-file":
-			i++
-			if i < len(os.Args) {
-				nodesFile = os.Args[i]
-			}
-		}
-	}
-
-	var nodes []AeroNode
-
-	if nodesFile != "" {
-		data, err := os.ReadFile(nodesFile)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error reading nodes file: %v\n", err)
-			os.Exit(1)
-		}
-		if err := json.Unmarshal(data, &nodes); err != nil {
-			fmt.Fprintf(os.Stderr, "Error parsing nodes file: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Printf("Loaded %d nodes from %s\n", len(nodes), nodesFile)
-	} else {
-		nodes = loadDefaultNodes()
-	}
-
-	if len(nodes) == 0 {
-		fmt.Fprintf(os.Stderr, "No aero_v2 nodes found\n")
-		os.Exit(1)
-	}
-
-	if err := cmdTUN(nodes); err != nil {
-		fmt.Fprintf(os.Stderr, "TUN error: %v\n", err)
 		os.Exit(1)
 	}
 }
@@ -187,7 +146,7 @@ func cmdSub() {
 		os.Exit(1)
 	}
 
-	nodes, err := fetchSubscription(os.Args[2])
+	nodes, err := core.FetchSubscription(os.Args[2])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -225,7 +184,7 @@ func cmdTest() {
 	nodeID, _ := strconv.Atoi(os.Args[2])
 	nodes := loadDefaultNodes()
 
-	var node *AeroNode
+	var node *core.AeroNode
 	for i := range nodes {
 		if nodes[i].ID == nodeID {
 			node = &nodes[i]
@@ -239,7 +198,7 @@ func cmdTest() {
 
 	fmt.Printf("Testing node %d (%s) -> %s:%d\n", node.ID, node.Name, node.Server, node.Port)
 
-	conn, err := OpenAeroTunnel(node, "www.google.com", 443)
+	conn, err := core.OpenAeroTunnel(node, "www.google.com", 443)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "FAILED: %v\n", err)
 		os.Exit(1)
@@ -256,12 +215,12 @@ func GetNodesJSON() string {
 	return string(data)
 }
 
-func loadDefaultNodes() []AeroNode {
+func loadDefaultNodes() []core.AeroNode {
 	data, err := os.ReadFile("nodes.json")
 	if err != nil {
 		return nil
 	}
-	var nodes []AeroNode
+	var nodes []core.AeroNode
 	if err := json.Unmarshal(data, &nodes); err != nil {
 		return nil
 	}

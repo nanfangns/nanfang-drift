@@ -14,7 +14,7 @@ No, not reliably.
 Reasons:
 
 1. The Windows GUI needs a runtime core binary named `nanfang-core.exe`
-2. That runtime binary is a release artifact, not tracked source output
+2. The Windows portable package also includes a bundled Python runtime
 3. The Android app is still only a Flutter shell and does not yet have a real Android-capable proxy core wired in
 4. TUN mode is not finished yet
 
@@ -29,11 +29,13 @@ So:
 
 Ship a zip bundle that contains at least:
 
-- `nanfang.exe` (Flutter GUI)
+- `nanfang.exe` (Windows launcher)
 - `nanfang-core.exe` (Go runtime core)
+- `runtime/` (bundled Python runtime)
 - optional extra files you want to ship
 
-The Flutter Windows GUI looks for `nanfang-core.exe` next to the app executable.
+The launcher starts `nanfang_gui.py` with the bundled runtime and keeps the
+portable package self-contained.
 
 ### Android
 
@@ -46,14 +48,6 @@ Current state:
 
 ## Local build
 
-### Flutter Windows GUI
-
-```powershell
-cd flutter_app
-D:\breakVelochron\flutter_sdk\bin\flutter.bat pub get
-D:\breakVelochron\flutter_sdk\bin\flutter.bat build windows --release
-```
-
 ### Go core
 
 ```powershell
@@ -65,14 +59,15 @@ D:\breakVelochron\toolchain\go\go\bin\go.exe build -o ..\nanfang-core.exe .
 
 Use:
 
-- `scripts/build_windows_release.ps1`
+- `scripts/build_windows_portable_release.ps1`
 
 It will:
 
 1. build `nanfang-core.exe`
-2. build the Flutter Windows GUI
-3. assemble a distributable bundle into `dist/windows-release/`
-4. create `dist/nanfang-windows.zip`
+2. build the Windows launcher
+3. bundle a Python runtime plus `nanfang_gui.py`
+4. assemble a distributable bundle into `dist/windows-portable-release/`
+5. create `dist/nanfang-windows.zip`
 
 ## GitHub Release recommendation
 
