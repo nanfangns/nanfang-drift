@@ -22,6 +22,8 @@ import org.json.JSONObject;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.net.Inet4Address;
@@ -56,6 +58,7 @@ public class VpnService extends android.net.VpnService implements SocketProtecto
     private static final String PREF_STATUS_AT = "vpn_status_at";
     private static final String GEOIP_FILE = "geoip-cn.mrs";
     private static final String GEOSITE_FILE = "geosite-cn.mrs";
+    private static final String CNCIDR_ROUTES_FILE = "cncidr-v4-14.txt";
     private static final String TUN_ADDR = "172.19.0.1";
     private static final int TUN_PREFIX = 30;
     private static final int TUN_MTU = 1350;
@@ -114,8 +117,13 @@ public class VpnService extends android.net.VpnService implements SocketProtecto
 
         if (intent != null && ACTION_QUERY.equals(intent.getAction())) {
             dbg("QUERY received");
-            publishStatus(currentState, activeNodeId, null, null);
-            return START_STICKY;
+            if (running) {
+                publishStatus(currentState, activeNodeId, null, null);
+                return START_STICKY;
+            }
+            publishStatus(STATE_DISCONNECTED, -1, null, null);
+            stopSelf(startId);
+            return START_NOT_STICKY;
         }
 
         if (intent != null && ACTION_SWITCH.equals(intent.getAction())) {
@@ -352,7 +360,56 @@ public class VpnService extends android.net.VpnService implements SocketProtecto
         } catch (Exception e) {
             Log.w(TAG, "addDisallowedApplication failed", e);
         }
+        addDomesticBypassApplications(builder);
         return builder;
+    }
+
+    private void addDomesticBypassApplications(Builder builder) {
+        String[] packages = new String[]{
+                "com.ss.android.ugc.aweme",
+                "com.ss.android.ugc.aweme.lite",
+                "com.ss.android.ugc.live",
+                "com.ss.android.article.news",
+                "com.ss.android.article.lite",
+                "com.ss.android.ugc.live.lite",
+                "com.ss.android.auto",
+                "com.ss.android.ugc.aweme.mobile",
+                "com.tencent.mm",
+                "com.tencent.mobileqq",
+                "com.tencent.tim",
+                "com.tencent.qqlive",
+                "com.tencent.qqmusic",
+                "com.tencent.weishi",
+                "com.eg.android.AlipayGphone",
+                "com.taobao.taobao",
+                "com.tmall.wireless",
+                "com.taobao.idlefish",
+                "com.jingdong.app.mall",
+                "com.sankuai.meituan",
+                "com.dianping.v1",
+                "com.sina.weibo",
+                "com.netease.cloudmusic",
+                "com.netease.mobimail",
+                "tv.danmaku.bili",
+                "com.bilibili.app.in",
+                "com.bilibili.studio",
+                "com.smile.gifmaker",
+                "com.kuaishou.nebula",
+                "com.xingin.xhs",
+                "com.zhihu.android",
+                "com.baidu.BaiduMap",
+                "com.baidu.netdisk",
+                "ctrip.android.view",
+                "com.Qunar",
+                "com.autonavi.minimap"
+        };
+        for (String packageName : packages) {
+            try {
+                builder.addDisallowedApplication(packageName);
+                dbg("domestic app bypass added " + packageName);
+            } catch (Exception ignored) {
+            }
+        }
     }
 
     private void cleanupVpnResources() {
@@ -728,6 +785,80 @@ public class VpnService extends android.net.VpnService implements SocketProtecto
 
     private JSONArray buildDefaultExtraRules() throws Exception {
         JSONArray rules = new JSONArray();
+        addPrivateCidrRules(rules);
+        addProxyDomainRules(rules);
+        addDirectDomainRules(rules);
+        String publicDomesticAction = publicDomesticAction();
+        addRule(rules, "geosite_cn", "", publicDomesticAction);
+        addRule(rules, "geoip_cn", "", publicDomesticAction);
+        addRule(rules, "match", "", "Proxy");
+        return rules;
+    }
+
+    private String publicDomesticAction() {
+        return Build.VERSION.SDK_INT >= 33 ? "Direct" : "Proxy";
+    }
+
+    private void addDirectDomainRules(JSONArray rules) throws Exception {
+        String action = publicDomesticAction();
+        String[] suffixes = new String[]{
+                "cn", "中国", "公司", "网络",
+                "douyin.com", "douyinpic.com", "douyinstatic.com", "douyinvod.com", "douyinliving.com",
+                "amemv.com", "amemv.net", "ixigua.com", "snssdk.com", "pstatp.com", "toutiao.com",
+                "byteimg.com", "bytedance.com", "bytedance.net", "bytecdn.cn", "bytecdn.com", "zijieapi.com",
+                "volces.com", "volccdn.com", "volcengine.com", "feelgood.cn", "ibytedtos.com", "ibytedapm.com",
+                "bdurl.net", "bdstatic.com", "baidu.com", "baidubce.com", "bcebos.com",
+                "qq.com", "gtimg.com", "qpic.cn", "weixin.qq.com", "wechat.com", "tenpay.com",
+                "alicdn.com", "aliyun.com", "alipay.com", "taobao.com", "tmall.com", "mmstat.com", "uc.cn",
+                "jd.com", "jd.hk", "jdpay.com", "360buyimg.com",
+                "bilibili.com", "biliapi.com", "bilivideo.com", "hdslb.com",
+                "kuaishou.com", "ksapisrv.com", "gifshow.com", "yximgs.com",
+                "xiaomi.com", "mi.com", "miui.com", "oppo.com", "coloros.com", "heytapmobi.com",
+                "vivo.com", "huawei.com", "hicloud.com", "hihonor.com", "honor.cn",
+                "meituan.com", "dianping.com", "ctrip.com", "qunar.com", "12306.cn",
+                "netease.com", "163.com", "126.net", "music.163.com", "sina.com.cn", "weibo.com",
+                "zhihu.com", "xiaohongshu.com", "xhscdn.com"
+        };
+        for (String suffix : suffixes) {
+            addRule(rules, "domain_suffix", suffix, action);
+        }
+        String[] keywords = new String[]{
+                "douyin", "aweme", "bytedance", "bytecdn", "toutiao", "ixigua", "pstatp",
+                "alicdn", "aliyun", "alipay", "taobao", "tmall", "qq", "wechat",
+                "weixin", "baidu", "bilibili", "kuaishou", "xiaohongshu", "netease"
+        };
+        for (String keyword : keywords) {
+            addRule(rules, "domain_keyword", keyword, action);
+        }
+        String[] exactDomains = new String[]{
+                "api.amemv.com",
+                "aweme.snssdk.com",
+                "www.douyin.com"
+        };
+        for (String domain : exactDomains) {
+            addRule(rules, "domain_exact", domain, action);
+        }
+    }
+
+    private void addPrivateCidrRules(JSONArray rules) throws Exception {
+        String[] cidrs = new String[]{
+                "10.0.0.0/8",
+                "172.16.0.0/12",
+                "192.168.0.0/16",
+                "100.64.0.0/10",
+                "169.254.0.0/16",
+                "224.0.0.0/4"
+        };
+        for (String cidr : cidrs) {
+            addRule(rules, "ip_cidr", cidr, "Direct");
+        }
+    }
+
+    private void addProxyDomainRules(JSONArray rules) throws Exception {
+        addRule(rules, "domain_suffix", "ldcstore.com", "Proxy");
+        addRule(rules, "domain_suffix", "qzz.io", "Proxy");
+        addRule(rules, "domain_suffix", "linux.do", "Proxy");
+        addRule(rules, "domain_suffix", "workers.dev", "Proxy");
         addRule(rules, "domain_suffix", "googleapis.com", "Proxy");
         addRule(rules, "domain_suffix", "googleusercontent.com", "Proxy");
         addRule(rules, "domain_suffix", "gvt1.com", "Proxy");
@@ -742,18 +873,13 @@ public class VpnService extends android.net.VpnService implements SocketProtecto
         addRule(rules, "domain_suffix", "ytimg.com", "Proxy");
         addRule(rules, "domain_keyword", "play-fe", "Proxy");
         addRule(rules, "domain_keyword", "android.clients.google", "Proxy");
-        addRule(rules, "private_ip", "", "Direct");
-        addRule(rules, "geosite_cn", "", "Direct");
-        addRule(rules, "geoip_cn", "", "Direct");
-        addRule(rules, "match", "", "Proxy");
-        return rules;
     }
 
     private void addRule(JSONArray rules, String type, String value, String action) throws Exception {
         JSONObject rule = new JSONObject();
         rule.put("type", type);
         rule.put("value", value);
-        rule.put("action", action);
+        rule.put("action", action.toLowerCase(Locale.ROOT));
         rules.put(rule);
     }
 
@@ -767,17 +893,46 @@ public class VpnService extends android.net.VpnService implements SocketProtecto
                 "192.168.0.0/16",
                 "100.64.0.0/10",
                 "169.254.0.0/16",
-                "127.0.0.0/8",
                 "224.0.0.0/4",
                 "255.255.255.255/32"
         };
+        int count = 0;
         for (String route : routes) {
-            try {
-                String[] parts = route.split("/");
-                builder.excludeRoute(new IpPrefix(InetAddress.getByName(parts[0]), Integer.parseInt(parts[1])));
-            } catch (Exception e) {
-                Log.w(TAG, "excludeRoute " + route + " failed", e);
+            if (excludeRoute(builder, route)) {
+                count++;
             }
+        }
+        count += excludeRoutesFromAsset(builder, CNCIDR_ROUTES_FILE);
+        dbg("excludeRoute installed count=" + count);
+    }
+
+    private int excludeRoutesFromAsset(Builder builder, String assetName) {
+        int count = 0;
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(getAssets().open(assetName), "UTF-8"))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                String route = line.trim();
+                if (route.isEmpty() || route.startsWith("#")) {
+                    continue;
+                }
+                if (excludeRoute(builder, route)) {
+                    count++;
+                }
+            }
+        } catch (Exception e) {
+            dbgErr("excludeRoutesFromAsset " + assetName + " failed", e);
+        }
+        return count;
+    }
+
+    private boolean excludeRoute(Builder builder, String route) {
+        try {
+            String[] parts = route.split("/");
+            builder.excludeRoute(new IpPrefix(InetAddress.getByName(parts[0]), Integer.parseInt(parts[1])));
+            return true;
+        } catch (Exception e) {
+            Log.w(TAG, "excludeRoute " + route + " failed", e);
+            return false;
         }
     }
 

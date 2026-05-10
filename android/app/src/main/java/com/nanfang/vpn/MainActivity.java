@@ -474,11 +474,20 @@ public class MainActivity extends Activity {
         long statusAt = prefs.getLong(PREF_STATUS_AT, 0L);
         String persistedState = prefs.getString(PREF_SERVICE_STATE, com.nanfang.vpn.VpnService.STATE_DISCONNECTED);
         boolean hasRecentStatus = statusAt > 0L && System.currentTimeMillis() - statusAt <= STATUS_STALE_MS;
-        if (runningFlag && (serviceAlive || hasRecentStatus)) {
+        boolean connectedState = com.nanfang.vpn.VpnService.STATE_CONNECTED.equals(persistedState)
+                || com.nanfang.vpn.VpnService.STATE_SWITCHING.equals(persistedState)
+                || com.nanfang.vpn.VpnService.STATE_RECONNECTING.equals(persistedState);
+        if (runningFlag && serviceAlive && hasRecentStatus && connectedState) {
             serviceState = persistedState;
         } else {
             serviceState = com.nanfang.vpn.VpnService.STATE_DISCONNECTED;
             activeNodeId = -1;
+            prefs.edit()
+                    .putBoolean(PREF_VPN_RUNNING, false)
+                    .putInt(PREF_ACTIVE_NODE_ID, -1)
+                    .putString(PREF_SERVICE_STATE, com.nanfang.vpn.VpnService.STATE_DISCONNECTED)
+                    .putLong(PREF_STATUS_AT, System.currentTimeMillis())
+                    .apply();
         }
         vpnRunning = com.nanfang.vpn.VpnService.STATE_CONNECTED.equals(serviceState)
                 || com.nanfang.vpn.VpnService.STATE_SWITCHING.equals(serviceState)
