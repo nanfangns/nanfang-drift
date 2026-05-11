@@ -14,6 +14,7 @@ import traceback
 import tkinter as tk
 from tkinter import ttk, messagebox
 from urllib.request import urlopen, Request
+from pathlib import Path
 import socket
 
 if getattr(sys, "frozen", False):
@@ -21,10 +22,43 @@ if getattr(sys, "frozen", False):
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 NODES_FILE = os.path.join(BASE_DIR, "nodes.json")
+SELECTED_NODES_FILE = os.path.join(BASE_DIR, "selected-node.json")
 SETTINGS_FILE = os.path.join(BASE_DIR, "settings.json")
 PROXY_PORT = 7890  # nanfang mixed proxy port (HTTP CONNECT + SOCKS5)
 PROXY_KEY = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
 DEBUG_LOG = os.path.join(BASE_DIR, "debug.log")
+CNCIDR_FILE = os.path.join(BASE_DIR, "cncidr-v4-12.txt")
+PAC_FILE = os.path.join(BASE_DIR, "nanfang_proxy.pac")
+
+PROXY_DOMAINS = [
+    "ldcstore.com", "ldstore.cc.cd", "qzz.io", "linux.do", "workers.dev",
+    "tacool.com", "cloudflareinsights.com", "cloudflare.com",
+    "google.com", "google.cn", "googleapis.com", "googleusercontent.com",
+    "gstatic.com", "gvt1.com", "gvt2.com", "ggpht.com", "googlevideo.com",
+    "android.com", "youtube.com", "ytimg.com",
+]
+
+
+DIRECT_DOMAINS = [
+    "cn", "中国", "公司", "网络",
+    "douyin.com", "douyinpic.com", "douyinstatic.com", "douyinvod.com", "douyinliving.com",
+    "amemv.com", "amemv.net", "ixigua.com", "snssdk.com", "pstatp.com", "toutiao.com",
+    "byteimg.com", "bytedance.com", "bytedance.net", "bytecdn.cn", "bytecdn.com", "zijieapi.com",
+    "volces.com", "volccdn.com", "volcengine.com", "feelgood.cn", "ibytedtos.com", "ibytedapm.com",
+    "bdurl.net", "bdstatic.com", "baidu.com", "baidubce.com", "bcebos.com",
+    "qq.com", "gtimg.com", "qpic.cn", "weixin.qq.com", "wechat.com", "tenpay.com",
+    "alicdn.com", "aliyun.com", "alipay.com", "taobao.com", "tmall.com", "mmstat.com", "uc.cn",
+    "jd.com", "jd.hk", "jdpay.com", "360buyimg.com",
+    "bilibili.com", "biliapi.com", "bilivideo.com", "hdslb.com",
+    "kuaishou.com", "ksapisrv.com", "gifshow.com", "yximgs.com",
+    "xiaomi.com", "mi.com", "miui.com", "oppo.com", "coloros.com", "heytapmobi.com",
+    "vivo.com", "huawei.com", "hicloud.com", "hihonor.com", "honor.cn",
+    "meituan.com", "dianping.com", "ctrip.com", "qunar.com", "12306.cn",
+    "netease.com", "163.com", "126.net", "music.163.com", "sina.com.cn", "weibo.com",
+    "zhihu.com", "xiaohongshu.com", "xhscdn.com",
+]
+
+CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 def log_debug(message):
@@ -90,11 +124,76 @@ def set_system_proxy(host, port):
         print(f"set proxy error: {e}")
 
 
+def _domain_pac_condition(domains):
+    parts = []
+    for domain in domains:
+        domain = domain.strip().lower()
+        if not domain:
+            continue
+        if domain in ("cn", "中国", "公司", "网络"):
+            parts.append(f"dnsDomainIs(host, '.{domain}')")
+        else:
+            parts.append(f"host === '{domain}' || dnsDomainIs(host, '.{domain}')")
+    return " ||\n        ".join(parts) or "false"
+
+
+def write_proxy_pac(host="127.0.0.1", port=PROXY_PORT):
+    proxy = f"PROXY {host}:{port}; SOCKS5 {host}:{port}"
+    pac = f"""function FindProxyForURL(url, host) {{
+    host = host.toLowerCase();
+    if (isPlainHostName(host) ||
+        shExpMatch(host, "localhost") ||
+        isInNet(host, "127.0.0.0", "255.0.0.0") ||
+        isInNet(host, "10.0.0.0", "255.0.0.0") ||
+        isInNet(host, "172.16.0.0", "255.240.0.0") ||
+        isInNet(host, "192.168.0.0", "255.255.0.0") ||
+        isInNet(host, "100.64.0.0", "255.192.0.0") ||
+        isInNet(host, "169.254.0.0", "255.255.0.0")) {{
+        return "DIRECT";
+    }}
+    if ({_domain_pac_condition(PROXY_DOMAINS)}) {{
+        return "{proxy}";
+    }}
+    if ({_domain_pac_condition(DIRECT_DOMAINS)}) {{
+        return "DIRECT";
+    }}
+    return "{proxy}";
+}}
+"""
+    with open(PAC_FILE, "w", encoding="utf-8") as f:
+        f.write(pac)
+    return Path(PAC_FILE).resolve().as_uri()
+
+
+def set_system_pac(host="127.0.0.1", port=PROXY_PORT):
+    try:
+        import winreg, ctypes
+        write_proxy_pac(host, port)
+        pac_url = Path(PAC_FILE).resolve().as_uri()
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, PROXY_KEY, 0, winreg.KEY_SET_VALUE)
+        winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
+        winreg.SetValueEx(key, "ProxyServer", 0, winreg.REG_SZ, "")
+        winreg.SetValueEx(key, "AutoConfigURL", 0, winreg.REG_SZ, pac_url)
+        winreg.CloseKey(key)
+        ctypes.windll.wininet.InternetSetOptionW(0, 39, 0, 0)
+        ctypes.windll.wininet.InternetSetOptionW(0, 37, 0, 0)
+        log_debug(f"set PAC proxy {pac_url}")
+        return pac_url
+    except Exception as e:
+        log_debug(f"set PAC proxy error: {e!r}")
+        set_system_proxy(host, str(port))
+        return ""
+
+
 def clear_system_proxy():
     try:
         import winreg, ctypes
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, PROXY_KEY, 0, winreg.KEY_SET_VALUE)
         winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
+        try:
+            winreg.DeleteValue(key, "AutoConfigURL")
+        except FileNotFoundError:
+            pass
         winreg.CloseKey(key)
         ctypes.windll.wininet.InternetSetOptionW(0, 39, 0, 0)
         ctypes.windll.wininet.InternetSetOptionW(0, 37, 0, 0)
@@ -182,6 +281,59 @@ def fetch_subscription_with_fallback(url):
             log_debug(f"fetch fail via {label}: {e!r}")
 
     raise last_error or RuntimeError("fetch failed")
+
+
+def run_hidden(cmd, timeout=10):
+    kwargs = {"capture_output": True, "text": True, "timeout": timeout}
+    if os.name == "nt":
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = 0
+        kwargs["startupinfo"] = si
+        kwargs["creationflags"] = CREATE_NO_WINDOW
+    return subprocess.run(cmd, **kwargs)
+
+
+def _run_route(args, timeout=8):
+    result = run_hidden(["route"] + args, timeout=timeout)
+    if result.returncode != 0:
+        text = (result.stderr or result.stdout or "").strip()
+        log_debug(f"route {' '.join(args)} -> {result.returncode} {text}")
+    return result.returncode == 0
+
+
+def _cidr_to_mask(prefix_len):
+    prefix_len = int(prefix_len)
+    mask = (0xffffffff << (32 - prefix_len)) & 0xffffffff
+    return ".".join(str((mask >> shift) & 0xff) for shift in (24, 16, 8, 0))
+
+
+def _iter_cncidr_routes():
+    if not os.path.exists(CNCIDR_FILE):
+        log_debug(f"CN-CIDR file missing: {CNCIDR_FILE}")
+        return
+    with open(CNCIDR_FILE, "r", encoding="ascii", errors="ignore") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "/" not in line:
+                continue
+            network, prefix = line.split("/", 1)
+            yield network, _cidr_to_mask(prefix)
+
+
+def _get_default_gateway():
+    try:
+        result = run_hidden(["powershell.exe", "-NoProfile", "-Command",
+                             "(Get-NetRoute -DestinationPrefix '0.0.0.0/0' | "
+                             "Where-Object { $_.NextHop -ne '0.0.0.0' } | "
+                             "Sort-Object RouteMetric,InterfaceMetric | "
+                             "Select-Object -First 1 -ExpandProperty NextHop)"], timeout=10)
+        gateway = (result.stdout or "").strip().splitlines()
+        if result.returncode == 0 and gateway:
+            return gateway[0].strip()
+    except Exception as e:
+        log_debug(f"get default gateway failed: {e!r}")
+    return ""
 
 
 def lerp_color(c1, c2, t):
@@ -616,6 +768,8 @@ class NanfangApp:
         self.nodes = []
         self.selected_idx = 0
         self.current_mode = None
+        self.tun_excluded_routes = []
+        self.physical_gateway = ""
         self.settings = self._load_settings()
         self.fetch_queue = queue.Queue()
         self.fetch_in_progress = False
@@ -637,6 +791,15 @@ class NanfangApp:
             node = self.nodes[idx]
             self.info_var.set(f"已选: {node.get('name', '?')} (ID:{node.get('node_id', '?')})")
             self._measure_latencies()
+
+    def _write_selected_node_file(self):
+        if not self.nodes:
+            raise RuntimeError("no nodes loaded")
+        idx = max(0, min(self.selected_idx, len(self.nodes) - 1))
+        node = dict(self.nodes[idx])
+        with open(SELECTED_NODES_FILE, "w", encoding="utf-8") as f:
+            json.dump([node], f, ensure_ascii=False, indent=2)
+        return SELECTED_NODES_FILE, node
 
     def _build_ui(self):
         # ── Header ──
@@ -918,7 +1081,7 @@ class NanfangApp:
         self._stop_nanfang()
 
         idx = max(0, min(self.selected_idx, len(self.nodes) - 1))
-        node = self.nodes[idx]
+        selected_nodes_file, node = self._write_selected_node_file()
         node_id = node.get("node_id", 0)
         name = node.get("name", "?")
 
@@ -926,7 +1089,7 @@ class NanfangApp:
             f.write(f"[{time.strftime('%H:%M:%S')}] _start_nanfang: selected_idx={idx} name={name} node_id={node_id}\n")
 
         try:
-            cmd = [core_exe, "serve", "--nodes-file", NODES_FILE,
+            cmd = [core_exe, "serve", "--nodes-file", selected_nodes_file,
                    "--node-id", str(node_id), "--listen", f"127.0.0.1:{PROXY_PORT}"]
             with open(os.path.join(BASE_DIR, "debug.log"), "a", encoding="utf-8") as f:
                 f.write(f"[{time.strftime('%H:%M:%S')}] Starting: {' '.join(cmd)}\n")
@@ -936,7 +1099,7 @@ class NanfangApp:
             si.wShowWindow = 0  # SW_HIDE
             self.process = subprocess.Popen(
                 cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                startupinfo=si, cwd=BASE_DIR,
+                startupinfo=si, cwd=BASE_DIR, creationflags=CREATE_NO_WINDOW,
             )
             with open(os.path.join(BASE_DIR, "debug.log"), "a", encoding="utf-8") as f:
                 f.write(f"[{time.strftime('%H:%M:%S')}] Process started, pid={self.process.pid}\n")
@@ -971,16 +1134,51 @@ class NanfangApp:
             # Give wintun driver time to clean up adapter state
             time.sleep(1)
 
+    def _install_tun_direct_routes(self):
+        """Exclude CN/LAN routes from TUN so domestic HTTPS uses the physical network."""
+        self._cleanup_tun_routes()
+        gateway = self.physical_gateway or _get_default_gateway()
+        if not gateway:
+            log_debug("skip TUN direct routes: default gateway not found")
+            return
+        routes = [
+            ("10.0.0.0", "255.0.0.0"),
+            ("172.16.0.0", "255.240.0.0"),
+            ("192.168.0.0", "255.255.0.0"),
+            ("100.64.0.0", "255.192.0.0"),
+            ("169.254.0.0", "255.255.0.0"),
+            ("224.0.0.0", "240.0.0.0"),
+        ]
+        routes.extend(_iter_cncidr_routes() or [])
+        installed = []
+        for network, mask in routes:
+            if _run_route(["add", network, "mask", mask, gateway, "metric", "1"], timeout=8):
+                installed.append((network, mask))
+        self.tun_excluded_routes = installed
+        log_debug(f"installed TUN direct routes: {len(installed)} via {gateway}")
+
     def _cleanup_tun_routes(self):
         """Remove TUN routes that were added by nanfang."""
         tun_gw = "10.0.0.1"
+        routes = list(getattr(self, "tun_excluded_routes", []) or [])
+        if not routes:
+            routes = [
+                ("10.0.0.0", "255.0.0.0"),
+                ("172.16.0.0", "255.240.0.0"),
+                ("192.168.0.0", "255.255.0.0"),
+                ("100.64.0.0", "255.192.0.0"),
+                ("169.254.0.0", "255.255.0.0"),
+                ("224.0.0.0", "240.0.0.0"),
+            ]
+            routes.extend(_iter_cncidr_routes() or [])
         try:
-            subprocess.run(["route", "delete", "0.0.0.0", "mask", "128.0.0.0", tun_gw],
-                           capture_output=True, timeout=5)
-            subprocess.run(["route", "delete", "128.0.0.0", "mask", "128.0.0.0", tun_gw],
-                           capture_output=True, timeout=5)
+            _run_route(["delete", "0.0.0.0", "mask", "128.0.0.0", tun_gw], timeout=5)
+            _run_route(["delete", "128.0.0.0", "mask", "128.0.0.0", tun_gw], timeout=5)
+            for network, mask in routes:
+                _run_route(["delete", network, "mask", mask], timeout=5)
         except Exception:
             pass
+        self.tun_excluded_routes = []
 
     def _set_buttons_busy(self):
         """Disable all action buttons during startup."""
@@ -1030,7 +1228,7 @@ class NanfangApp:
                 self._set_buttons_idle()
                 return
             # nanfang is alive, set proxy
-            set_system_proxy("127.0.0.1", str(PROXY_PORT))
+            set_system_pac("127.0.0.1", PROXY_PORT)
             self.current_mode = "system_proxy"
             self._set_buttons_idle()
             self.info_var.set(f"系统代理已开启 | {name} | 127.0.0.1:{PROXY_PORT}")
@@ -1043,19 +1241,19 @@ class NanfangApp:
         """Restart proxy with currently selected node."""
         self._stop_nanfang()
         idx = max(0, min(self.selected_idx, len(self.nodes) - 1))
-        node = self.nodes[idx]
+        selected_nodes_file, node = self._write_selected_node_file()
         node_id = node.get("node_id", 0)
         name = node.get("name", "?")
 
         try:
-            cmd = [get_core_exe(), "serve", "--nodes-file", NODES_FILE,
+            cmd = [get_core_exe(), "serve", "--nodes-file", selected_nodes_file,
                    "--node-id", str(node_id), "--listen", f"127.0.0.1:{PROXY_PORT}"]
             si = subprocess.STARTUPINFO()
             si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             si.wShowWindow = 0
             self.process = subprocess.Popen(
                 cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                startupinfo=si, cwd=BASE_DIR,
+                startupinfo=si, cwd=BASE_DIR, creationflags=CREATE_NO_WINDOW,
             )
             self.info_var.set(f"已切换: {name} (ID:{node_id}) | 127.0.0.1:{PROXY_PORT}")
         except Exception as e:
@@ -1076,14 +1274,16 @@ class NanfangApp:
             return
 
         idx = max(0, min(self.selected_idx, len(self.nodes) - 1))
-        node = self.nodes[idx]
+        selected_nodes_file, node = self._write_selected_node_file()
         name = node.get("name", "?")
 
         self._set_buttons_busy()
+        self.physical_gateway = _get_default_gateway()
+        log_debug(f"physical gateway before TUN: {self.physical_gateway or 'not found'}")
         self._stop_nanfang()
 
         try:
-            cmd = [core_exe, "tun", "--nodes-file", NODES_FILE]
+            cmd = [core_exe, "tun", "--nodes-file", selected_nodes_file]
             with open(os.path.join(BASE_DIR, "debug.log"), "a", encoding="utf-8") as f:
                 f.write(f"[{time.strftime('%H:%M:%S')}] Starting TUN: {' '.join(cmd)}\n")
             si = subprocess.STARTUPINFO()
@@ -1092,7 +1292,7 @@ class NanfangApp:
             tun_log = open(os.path.join(BASE_DIR, "tun.log"), "w", encoding="utf-8")
             self.process = subprocess.Popen(
                 cmd, stdout=tun_log, stderr=subprocess.STDOUT,
-                startupinfo=si, cwd=BASE_DIR,
+                startupinfo=si, cwd=BASE_DIR, creationflags=CREATE_NO_WINDOW,
             )
         except Exception as e:
             self._set_buttons_idle()
@@ -1104,6 +1304,7 @@ class NanfangApp:
                 self._set_buttons_idle()
                 messagebox.showerror("错误", "TUN 模式启动失败，请检查 wintun.dll 是否存在")
                 return
+            self._install_tun_direct_routes()
             self.current_mode = "tun"
             self._set_buttons_idle()
             self.info_var.set(f"TUN 模式已开启 | {name}")
