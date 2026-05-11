@@ -855,22 +855,52 @@ public class VpnService extends android.net.VpnService implements SocketProtecto
     }
 
     private void addProxyDomainRules(JSONArray rules) throws Exception {
-        addRule(rules, "domain_suffix", "ldcstore.com", "Proxy");
-        addRule(rules, "domain_suffix", "qzz.io", "Proxy");
-        addRule(rules, "domain_suffix", "linux.do", "Proxy");
-        addRule(rules, "domain_suffix", "workers.dev", "Proxy");
-        addRule(rules, "domain_suffix", "googleapis.com", "Proxy");
-        addRule(rules, "domain_suffix", "googleusercontent.com", "Proxy");
-        addRule(rules, "domain_suffix", "gvt1.com", "Proxy");
-        addRule(rules, "domain_suffix", "gvt2.com", "Proxy");
-        addRule(rules, "domain_suffix", "ggpht.com", "Proxy");
-        addRule(rules, "domain_suffix", "googlevideo.com", "Proxy");
-        addRule(rules, "domain_suffix", "android.com", "Proxy");
-        addRule(rules, "domain_suffix", "google.com", "Proxy");
-        addRule(rules, "domain_suffix", "google.cn", "Proxy");
-        addRule(rules, "domain_suffix", "gstatic.com", "Proxy");
-        addRule(rules, "domain_suffix", "youtube.com", "Proxy");
-        addRule(rules, "domain_suffix", "ytimg.com", "Proxy");
+        String[] exactDomains = new String[]{
+                "ldcstore.com",
+                "www.ldcstore.com",
+                "ldstore.cc.cd",
+                "www.ldstore.cc.cd",
+                "api2.ldspro.qzz.io",
+                "api1.ldspro.qzz.io",
+                "api.ldspro.qzz.io",
+                "img.ldspro.qzz.io",
+                "credit.linux.do",
+                "linux.do",
+                "mxana.tacool.com",
+                "static.cloudflareinsights.com",
+                "challenges.cloudflare.com",
+                "a.nel.cloudflare.com"
+        };
+        for (String domain : exactDomains) {
+            addRule(rules, "domain_exact", domain, "Proxy");
+        }
+
+        String[] suffixes = new String[]{
+                "ldcstore.com",
+                "ldstore.cc.cd",
+                "qzz.io",
+                "linux.do",
+                "workers.dev",
+                "tacool.com",
+                "cloudflareinsights.com",
+                "cloudflare.com",
+                "googleapis.com",
+                "googleusercontent.com",
+                "gvt1.com",
+                "gvt2.com",
+                "ggpht.com",
+                "googlevideo.com",
+                "android.com",
+                "google.com",
+                "google.cn",
+                "gstatic.com",
+                "youtube.com",
+                "ytimg.com"
+        };
+        for (String suffix : suffixes) {
+            addRule(rules, "domain_suffix", suffix, "Proxy");
+        }
+
         addRule(rules, "domain_keyword", "play-fe", "Proxy");
         addRule(rules, "domain_keyword", "android.clients.google", "Proxy");
     }
