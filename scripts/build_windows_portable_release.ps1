@@ -17,6 +17,7 @@ $runtimeDir = Join-Path $releaseDir "runtime"
 $coreExe = Join-Path $Root "nanfang-core.exe"
 $launcherExe = Join-Path $releaseDir "nanfang.exe"
 $guiScript = Join-Path $Root "nanfang_gui.py"
+$pacFile = Join-Path $Root "nanfang_proxy.pac"
 $zipPath = Join-Path $Root "dist\nanfang-windows.zip"
 
 New-Item -ItemType Directory -Force -Path (Join-Path $Root "dist") | Out-Null
@@ -66,6 +67,9 @@ Pop-Location
 Write-Host "==> Copy application files"
 Copy-Item -LiteralPath $guiScript -Destination (Join-Path $releaseDir "nanfang_gui.py") -Force
 Copy-Item -LiteralPath $coreExe -Destination (Join-Path $releaseDir "nanfang-core.exe") -Force
+if (Test-Path $pacFile) {
+    Copy-Item -LiteralPath $pacFile -Destination (Join-Path $releaseDir "nanfang_proxy.pac") -Force
+}
 if (Test-Path (Join-Path $Root "wintun.dll")) {
     Copy-Item -LiteralPath (Join-Path $Root "wintun.dll") -Destination (Join-Path $releaseDir "wintun.dll") -Force
 }

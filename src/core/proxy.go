@@ -1,15 +1,22 @@
 package core
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"net/textproto"
+	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
+
+var openTunnel = OpenAeroTunnel
 
 func ServeProxy(listenAddr string, nodes []AeroNode) error {
 	ln, err := net.Listen("tcp", listenAddr)
@@ -62,7 +69,7 @@ func handleSOCKS5Client(conn net.Conn, firstByte byte, nodes []AeroNode) {
 	}
 
 	node := PickNode(nodes)
-	remote, err := OpenAeroTunnel(&node, host, port)
+	remote, err := openTunnel(&node, host, port)
 	if err != nil {
 		log.Printf("tunnel error %s:%d via %s: %v\n", host, port, node.Name, err)
 		socks5SendReply(conn, 0x01)
@@ -153,88 +160,227 @@ func socks5SendReply(conn net.Conn, rep byte) {
 	conn.Write([]byte{5, rep, 0, 1, 0, 0, 0, 0, 0, 0})
 }
 
+type httpProxyRequest struct {
+	method     string
+	target     string
+	version    string
+	connect    bool
+	host       string
+	port       int
+	requestURI string
+	headers    textproto.MIMEHeader
+}
+
 func handleHTTPClient(conn net.Conn, firstByte byte, nodes []AeroNode) {
-	rest := make([]byte, 0, 256)
-	rest = append(rest, firstByte)
-
-	tmp := make([]byte, 1)
-	for {
-		if _, err := io.ReadFull(conn, tmp); err != nil {
-			return
-		}
-		rest = append(rest, tmp[0])
-		if len(rest) >= 2 && rest[len(rest)-2] == '\r' && rest[len(rest)-1] == '\n' {
-			break
-		}
-		if len(rest) > 4096 {
-			return
-		}
-	}
-
-	line := string(rest[:len(rest)-2])
-	var host string
-	var port int
-
-	fmt.Sscanf(line, "CONNECT %s", &host)
-
-	if host == "" {
-		var url string
-		fmt.Sscanf(line, "%s %s", &url, &url)
-		if len(url) > 7 && url[:7] == "http://" {
-			url = url[7:]
-			if idx := strings.Index(url, "/"); idx > 0 {
-				url = url[:idx]
-			}
-			if idx := strings.Index(url, ":"); idx > 0 {
-				host = url[:idx]
-				fmt.Sscanf(url[idx+1:], "%d", &port)
-			} else {
-				host = url
-				port = 80
-			}
-		}
-	}
-
-	if host == "" {
-		conn.Write([]byte("HTTP/1.1 400 Bad Request\r\n\r\n"))
+	reader := bufio.NewReader(io.MultiReader(bytes.NewReader([]byte{firstByte}), conn))
+	req, err := parseHTTPProxyRequest(reader)
+	if err != nil {
+		conn.Write([]byte("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n"))
 		return
-	}
-
-	if port == 0 {
-		if idx := strings.LastIndex(host, ":"); idx > 0 {
-			fmt.Sscanf(host[idx+1:], "%d", &port)
-			host = host[:idx]
-		} else {
-			port = 80
-		}
-	}
-
-	for {
-		hdr := make([]byte, 0, 256)
-		for {
-			if _, err := io.ReadFull(conn, tmp); err != nil {
-				return
-			}
-			hdr = append(hdr, tmp[0])
-			if len(hdr) >= 2 && hdr[len(hdr)-2] == '\r' && hdr[len(hdr)-1] == '\n' {
-				break
-			}
-		}
-		if string(hdr) == "\r\n" {
-			break
-		}
 	}
 
 	node := PickNode(nodes)
-	remote, err := OpenAeroTunnel(&node, host, port)
+	remote, err := openTunnel(&node, req.host, req.port)
 	if err != nil {
-		log.Printf("tunnel error %s:%d via %s: %v\n", host, port, node.Name, err)
-		conn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
+		log.Printf("tunnel error %s:%d via %s: %v\n", req.host, req.port, node.Name, err)
+		conn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n"))
 		return
 	}
 
-	conn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
-	log.Printf(">> %s:%d via %s (http)\n", host, port, node.Name)
-	relay(conn, remote)
-	log.Printf("<< %s:%d closed\n", host, port)
+	if req.connect {
+		conn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
+		log.Printf(">> %s:%d via %s (connect)\n", req.host, req.port, node.Name)
+		relay(conn, remote)
+		log.Printf("<< %s:%d closed\n", req.host, req.port)
+		return
+	}
+
+	if err := writeHTTPRequest(remote, req); err != nil {
+		remote.Close()
+		conn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n"))
+		return
+	}
+
+	log.Printf(">> %s:%d via %s (http)\n", req.host, req.port, node.Name)
+	relayHTTP(conn, remote, reader)
+	log.Printf("<< %s:%d closed\n", req.host, req.port)
+}
+
+func parseHTTPProxyRequest(reader *bufio.Reader) (*httpProxyRequest, error) {
+	tp := textproto.NewReader(reader)
+	line, err := tp.ReadLine()
+	if err != nil {
+		return nil, err
+	}
+	parts := strings.SplitN(line, " ", 3)
+	if len(parts) != 3 {
+		return nil, fmt.Errorf("invalid request line")
+	}
+
+	req := &httpProxyRequest{
+		method:  parts[0],
+		target:  parts[1],
+		version: parts[2],
+	}
+
+	headers, err := tp.ReadMIMEHeader()
+	if err != nil {
+		return nil, err
+	}
+	req.headers = headers
+
+	if strings.EqualFold(req.method, "CONNECT") {
+		host, port, err := splitHostPortDefault(req.target, 443)
+		if err != nil {
+			return nil, err
+		}
+		req.connect = true
+		req.host = host
+		req.port = port
+		return req, nil
+	}
+
+	if parsedURL, err := url.Parse(req.target); err == nil && parsedURL.Host != "" {
+		defaultPort := 80
+		if strings.EqualFold(parsedURL.Scheme, "https") {
+			defaultPort = 443
+		}
+		host, port, err := splitHostPortDefault(parsedURL.Host, defaultPort)
+		if err != nil {
+			return nil, err
+		}
+		req.host = host
+		req.port = port
+		req.requestURI = parsedURL.RequestURI()
+		if req.requestURI == "" {
+			req.requestURI = "/"
+		}
+		return req, nil
+	}
+
+	hostHeader := strings.TrimSpace(req.headers.Get("Host"))
+	if hostHeader == "" {
+		return nil, fmt.Errorf("missing host header")
+	}
+	host, port, err := splitHostPortDefault(hostHeader, 80)
+	if err != nil {
+		return nil, err
+	}
+	req.host = host
+	req.port = port
+	req.requestURI = req.target
+	if req.requestURI == "" {
+		req.requestURI = "/"
+	}
+	return req, nil
+}
+
+func splitHostPortDefault(addr string, defaultPort int) (string, int, error) {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return "", 0, fmt.Errorf("empty host")
+	}
+
+	if strings.HasPrefix(addr, "[") {
+		host, portStr, err := net.SplitHostPort(addr)
+		if err == nil {
+			port, convErr := strconv.Atoi(portStr)
+			if convErr != nil {
+				return "", 0, convErr
+			}
+			return host, port, nil
+		}
+		if strings.Contains(err.Error(), "missing port in address") {
+			return strings.Trim(addr, "[]"), defaultPort, nil
+		}
+		return "", 0, err
+	}
+
+	if strings.Count(addr, ":") == 0 {
+		return addr, defaultPort, nil
+	}
+
+	if strings.Count(addr, ":") == 1 {
+		host, portStr, found := strings.Cut(addr, ":")
+		if !found || host == "" || portStr == "" {
+			return "", 0, fmt.Errorf("invalid host:port %q", addr)
+		}
+		port, err := strconv.Atoi(portStr)
+		if err != nil {
+			return "", 0, err
+		}
+		return host, port, nil
+	}
+
+	host, portStr, err := net.SplitHostPort(addr)
+	if err == nil {
+		port, convErr := strconv.Atoi(portStr)
+		if convErr != nil {
+			return "", 0, convErr
+		}
+		return host, port, nil
+	}
+
+	if strings.Contains(err.Error(), "missing port in address") {
+		return addr, defaultPort, nil
+	}
+	return "", 0, err
+}
+
+func writeHTTPRequest(dst io.Writer, req *httpProxyRequest) error {
+	var buf bytes.Buffer
+	fmt.Fprintf(&buf, "%s %s %s\r\n", req.method, req.requestURI, req.version)
+
+	hostWritten := false
+	for key, values := range req.headers {
+		switch {
+		case strings.EqualFold(key, "Host"):
+			hostWritten = true
+		case strings.EqualFold(key, "Connection"):
+			continue
+		case strings.EqualFold(key, "Proxy-Connection"):
+			continue
+		case strings.EqualFold(key, "Proxy-Authorization"):
+			continue
+		}
+
+		for _, value := range values {
+			fmt.Fprintf(&buf, "%s: %s\r\n", key, value)
+		}
+	}
+
+	if !hostWritten {
+		fmt.Fprintf(&buf, "Host: %s\r\n", formatAuthority(req.host, req.port))
+	}
+	buf.WriteString("Connection: close\r\n\r\n")
+
+	_, err := dst.Write(buf.Bytes())
+	return err
+}
+
+func formatAuthority(host string, port int) string {
+	switch {
+	case strings.Contains(host, ":"):
+		return net.JoinHostPort(host, strconv.Itoa(port))
+	case port == 80:
+		return host
+	default:
+		return net.JoinHostPort(host, strconv.Itoa(port))
+	}
+}
+
+func relayHTTP(client net.Conn, remote net.Conn, clientReader io.Reader) {
+	done := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(remote, clientReader)
+		if tc, ok := remote.(*net.TCPConn); ok {
+			_ = tc.CloseWrite()
+		}
+		close(done)
+	}()
+
+	_, _ = io.Copy(client, remote)
+	_ = client.Close()
+	_ = remote.Close()
+	<-done
 }

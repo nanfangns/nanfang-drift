@@ -2,16 +2,19 @@ package com.nanfang.vpn;
 
 import android.app.Activity;
 import android.app.ActivityManager;
+import android.Manifest;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.net.VpnService;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.view.MotionEvent;
 import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
@@ -58,7 +61,35 @@ public class MainActivity extends Activity {
     private boolean statusReceiverRegistered = false;
     private long statusTimeoutGeneration = 0;
     private long statusQueryGeneration = 0;
+    private boolean spinnerTouchedWhileConnected = false;
+    private boolean notificationPermissionRequestInFlight = false;
+    private int lastObservedSelectedNodeId = -1;
+    private boolean selectionMonitorRunning = false;
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
+    private final Runnable selectionMonitor = new Runnable() {
+        @Override
+        public void run() {
+            if (!selectionMonitorRunning) {
+                return;
+            }
+            try {
+                int selectedNodeId = getSelectedNodeId();
+                if (selectedNodeId > 0 && selectedNodeId != lastObservedSelectedNodeId) {
+                    dbg("selectionMonitor changed old=" + lastObservedSelectedNodeId
+                            + " new=" + selectedNodeId
+                            + " active=" + prefs.getInt(PREF_ACTIVE_NODE_ID, -1)
+                            + " state=" + serviceState);
+                    lastObservedSelectedNodeId = selectedNodeId;
+                    if (vpnRunning && !isTransientState()) {
+                        maybeRequestNodeSwitch("selectionMonitor", false);
+                    }
+                }
+            } catch (Exception e) {
+                dbgErr("selectionMonitor failed", e);
+            }
+            uiHandler.postDelayed(this, 500);
+        }
+    };
 
     private final BroadcastReceiver statusReceiver = new BroadcastReceiver() {
         @Override
@@ -74,6 +105,7 @@ public class MainActivity extends Activity {
     };
 
     private static final int VPN_REQUEST = 100;
+    private static final int NOTIFICATION_PERMISSION_REQUEST = 101;
     private static final String PREFS = "nanfang_prefs";
     private static final String NODES_FILE = "nodes.json";
     private static final String PREF_VPN_RUNNING = "vpn_running";
@@ -115,23 +147,30 @@ public class MainActivity extends Activity {
 
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         etUrl.setText(prefs.getString("sub_url", ""));
+        ensureNotificationPermission();
 
         btnFetch.setOnClickListener(v -> fetchNodes());
         btnConnect.setOnClickListener(v -> toggleVpn());
+        spinnerNodes.setOnTouchListener((v, event) -> {
+            if (event.getAction() == MotionEvent.ACTION_DOWN && vpnRunning && !isTransientState()) {
+                spinnerTouchedWhileConnected = true;
+                dbg("spinner touch while connected active=" + prefs.getInt(PREF_ACTIVE_NODE_ID, -1)
+                        + " selected=" + getSelectedNodeId());
+            }
+            return false;
+        });
         spinnerNodes.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override
             public void onItemSelected(AdapterView<?> parent, android.view.View view, int position, long id) {
                 if (suppressSelectionCallback) {
                     return;
                 }
+                dbg("onItemSelected pos=" + position + " selectedNodeId=" + getSelectedNodeId()
+                        + " activeNodeId=" + prefs.getInt(PREF_ACTIVE_NODE_ID, -1)
+                        + " touched=" + spinnerTouchedWhileConnected
+                        + " state=" + serviceState);
                 syncVpnState();
-                if (vpnRunning && !isTransientState()) {
-                    int activeNodeId = prefs.getInt(PREF_ACTIVE_NODE_ID, -1);
-                    int selectedNodeId = getSelectedNodeId();
-                    if (selectedNodeId > 0 && activeNodeId > 0 && selectedNodeId != activeNodeId) {
-                        requestSwitchNode();
-                    }
-                }
+                maybeRequestNodeSwitch("onItemSelected", false);
             }
 
             @Override
@@ -144,19 +183,23 @@ public class MainActivity extends Activity {
         if (!saved.isEmpty()) {
             loadNodesUI(saved);
         }
+        lastObservedSelectedNodeId = getSelectedNodeId();
         syncVpnState();
     }
 
     @Override
     protected void onStart() {
         super.onStart();
+        ensureNotificationPermission();
         registerStatusReceiver();
+        startSelectionMonitor();
         syncVpnState();
         requestServiceStatus();
     }
 
     @Override
     protected void onStop() {
+        stopSelectionMonitor();
         unregisterStatusReceiver();
         super.onStop();
     }
@@ -323,6 +366,7 @@ public class MainActivity extends Activity {
                 spinnerNodes.setSelection(lastIdx);
             }
             suppressSelectionCallback = false;
+            lastObservedSelectedNodeId = getSelectedNodeId();
         } catch (Exception e) {
             suppressSelectionCallback = false;
             Toast.makeText(this, "Parse error: " + e.getMessage(), Toast.LENGTH_SHORT).show();
@@ -343,6 +387,7 @@ public class MainActivity extends Activity {
 
     private void startVpn() {
         dbg("startVpn selectedIndex=" + spinnerNodes.getSelectedItemPosition());
+        ensureNotificationPermission();
         // Write nodes file
         try {
             File f = writeSelectedNodeFile();
@@ -440,6 +485,7 @@ public class MainActivity extends Activity {
     private void stopVpn() {
         switchInProgress = false;
         pendingSwitchNodeId = -1;
+        spinnerTouchedWhileConnected = false;
         statusTimeoutGeneration++;
         Intent intent = new Intent(this, com.nanfang.vpn.VpnService.class);
         intent.setAction(com.nanfang.vpn.VpnService.ACTION_STOP);
@@ -458,8 +504,59 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        ensureNotificationPermission();
+        lastObservedSelectedNodeId = getSelectedNodeId();
         syncVpnState();
         requestServiceStatus();
+    }
+
+    private void startSelectionMonitor() {
+        if (selectionMonitorRunning) {
+            return;
+        }
+        selectionMonitorRunning = true;
+        lastObservedSelectedNodeId = getSelectedNodeId();
+        uiHandler.post(selectionMonitor);
+    }
+
+    private void stopSelectionMonitor() {
+        selectionMonitorRunning = false;
+        uiHandler.removeCallbacks(selectionMonitor);
+    }
+
+    private void ensureNotificationPermission() {
+        if (Build.VERSION.SDK_INT < 33) {
+            return;
+        }
+        if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
+            notificationPermissionRequestInFlight = false;
+            return;
+        }
+        if (notificationPermissionRequestInFlight) {
+            return;
+        }
+        try {
+            notificationPermissionRequestInFlight = true;
+            dbg("request POST_NOTIFICATIONS");
+            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, NOTIFICATION_PERMISSION_REQUEST);
+        } catch (Exception e) {
+            notificationPermissionRequestInFlight = false;
+            dbgErr("request POST_NOTIFICATIONS failed", e);
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode != NOTIFICATION_PERMISSION_REQUEST) {
+            return;
+        }
+        notificationPermissionRequestInFlight = false;
+        boolean granted = grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED;
+        dbg("POST_NOTIFICATIONS result granted=" + granted);
+        if (!granted) {
+            Toast.makeText(this, "Allow notifications to show real-time speed in status bar", Toast.LENGTH_LONG).show();
+        }
     }
 
     private void syncVpnState() {
@@ -477,17 +574,24 @@ public class MainActivity extends Activity {
         boolean connectedState = com.nanfang.vpn.VpnService.STATE_CONNECTED.equals(persistedState)
                 || com.nanfang.vpn.VpnService.STATE_SWITCHING.equals(persistedState)
                 || com.nanfang.vpn.VpnService.STATE_RECONNECTING.equals(persistedState);
-        if (runningFlag && serviceAlive && hasRecentStatus && connectedState) {
+        boolean hasConnectedHint = connectedState && (runningFlag || activeNodeId > 0);
+        if (hasConnectedHint && (serviceAlive || hasRecentStatus)) {
+            serviceState = persistedState;
+        } else if (serviceAlive) {
             serviceState = persistedState;
         } else {
             serviceState = com.nanfang.vpn.VpnService.STATE_DISCONNECTED;
             activeNodeId = -1;
-            prefs.edit()
-                    .putBoolean(PREF_VPN_RUNNING, false)
-                    .putInt(PREF_ACTIVE_NODE_ID, -1)
-                    .putString(PREF_SERVICE_STATE, com.nanfang.vpn.VpnService.STATE_DISCONNECTED)
-                    .putLong(PREF_STATUS_AT, System.currentTimeMillis())
-                    .apply();
+            if (!runningFlag && activeNodeId <= 0) {
+                prefs.edit()
+                        .putBoolean(PREF_VPN_RUNNING, false)
+                        .putInt(PREF_ACTIVE_NODE_ID, -1)
+                        .putString(PREF_SERVICE_STATE, com.nanfang.vpn.VpnService.STATE_DISCONNECTED)
+                        .putLong(PREF_STATUS_AT, System.currentTimeMillis())
+                        .apply();
+            } else {
+                dbg("syncVpnState waiting status query before clearing connected hint");
+            }
         }
         vpnRunning = com.nanfang.vpn.VpnService.STATE_CONNECTED.equals(serviceState)
                 || com.nanfang.vpn.VpnService.STATE_SWITCHING.equals(serviceState)
@@ -498,9 +602,16 @@ public class MainActivity extends Activity {
             pendingSwitchNodeId = -1;
         }
         if (vpnRunning && selectedNodeId > 0 && activeNodeId > 0 && selectedNodeId != activeNodeId) {
-            tvStatus.setText(switchInProgress ? "Status: Switching node" : "Status: Connected - select node to switch");
-            tvStatus.setTextColor(0xFF43A047);
-            applyControlState(false);
+            if (switchInProgress) {
+                tvStatus.setText("Status: Switching node");
+                tvStatus.setTextColor(0xFFF9A825);
+                applyControlState(false);
+            } else {
+                tvStatus.setText("Status: Connected - selected node differs, switching soon");
+                tvStatus.setTextColor(0xFF43A047);
+                applyControlState(true);
+                maybeRequestNodeSwitch("syncVpnState", true);
+            }
             return;
         }
         applyUiState(activeNodeId);
@@ -568,6 +679,7 @@ public class MainActivity extends Activity {
             vpnRunning = false;
             switchInProgress = false;
             pendingSwitchNodeId = -1;
+            spinnerTouchedWhileConnected = false;
             statusTimeoutGeneration++;
             applyErrorState(error != null && !error.isEmpty() ? error : "VPN error");
             Toast.makeText(this, error != null && !error.isEmpty() ? error : "VPN error", Toast.LENGTH_LONG).show();
@@ -576,9 +688,11 @@ public class MainActivity extends Activity {
             vpnRunning = false;
             switchInProgress = false;
             pendingSwitchNodeId = -1;
+            spinnerTouchedWhileConnected = false;
             statusTimeoutGeneration++;
         }
         applyUiState(nodeId);
+        maybeRequestNodeSwitch("handleServiceStatus", true);
     }
 
     private void requestServiceStatus() {
@@ -655,6 +769,7 @@ public class MainActivity extends Activity {
         tvStatus.setTextColor(0xFF666666);
         switchInProgress = false;
         pendingSwitchNodeId = -1;
+        spinnerTouchedWhileConnected = false;
         applyControlState(true);
     }
 
@@ -718,6 +833,30 @@ public class MainActivity extends Activity {
         return f;
     }
 
+    private void maybeRequestNodeSwitch(String source, boolean requireTouchFlag) {
+        if (!vpnRunning || isTransientState()) {
+            return;
+        }
+        if (requireTouchFlag && !spinnerTouchedWhileConnected) {
+            return;
+        }
+        int activeNodeId = prefs.getInt(PREF_ACTIVE_NODE_ID, -1);
+        int selectedNodeId = getSelectedNodeId();
+        dbg("maybeRequestNodeSwitch source=" + source
+                + " active=" + activeNodeId
+                + " selected=" + selectedNodeId
+                + " touched=" + spinnerTouchedWhileConnected
+                + " switchInProgress=" + switchInProgress
+                + " state=" + serviceState);
+        if (selectedNodeId <= 0 || activeNodeId <= 0 || selectedNodeId == activeNodeId) {
+            if (selectedNodeId == activeNodeId) {
+                spinnerTouchedWhileConnected = false;
+            }
+            return;
+        }
+        requestSwitchNode();
+    }
+
     private void requestSwitchNode() {
         try {
             File f = writeSelectedNodeFile();
@@ -728,6 +867,7 @@ public class MainActivity extends Activity {
             if (switchInProgress && pendingSwitchNodeId == selectedNodeId) {
                 return;
             }
+            spinnerTouchedWhileConnected = false;
             dbg("requestSwitchNode nodeId=" + selectedNodeId + " bytes=" + f.length());
             Intent switchIntent = new Intent(this, com.nanfang.vpn.VpnService.class);
             switchIntent.setAction(com.nanfang.vpn.VpnService.ACTION_SWITCH);

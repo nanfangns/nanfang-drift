@@ -1,5 +1,6 @@
 package com.nanfang.vpn;
 
+import android.app.PendingIntent;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -31,6 +32,8 @@ import java.net.InetAddress;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class VpnService extends android.net.VpnService implements SocketProtector {
     private static final String TAG = "NanFangVPN";
@@ -82,6 +85,12 @@ public class VpnService extends android.net.VpnService implements SocketProtecto
     private ConnectivityManager.NetworkCallback networkCallback;
     private final Object lifecycleLock = new Object();
     private volatile long ignoreNetworkEventsUntil = 0L;
+    private volatile String notificationStatusText = "VPN disconnected";
+    private volatile long lastTrafficSampleAt = 0L;
+    private volatile long lastTxBytes = -1L;
+    private volatile long lastRxBytes = -1L;
+    private volatile long lastUpBytesPerSec = 0L;
+    private volatile long lastDownBytesPerSec = 0L;
 
     private void dbg(String msg) {
         Log.i(TAG, msg);
@@ -197,24 +206,231 @@ public class VpnService extends android.net.VpnService implements SocketProtecto
     }
 
     private Notification buildNotification(String text) {
+        return buildNotification(text, false);
+    }
+
+    private Notification buildNotification(String text, boolean preferTrafficText) {
+        String title = activeNodeId > 0 ? "NanFang VPN - Node " + activeNodeId : "NanFang VPN";
+        String contentText = text;
+        Notification.BigTextStyle style = new Notification.BigTextStyle();
+
+        if (preferTrafficText && STATE_CONNECTED.equals(currentState)) {
+            String speedLine = "UP " + formatRate(lastUpBytesPerSec) + " | DOWN " + formatRate(lastDownBytesPerSec);
+            contentText = speedLine;
+            StringBuilder big = new StringBuilder(speedLine);
+            if (lastTxBytes >= 0L || lastRxBytes >= 0L) {
+                big.append("\nTotal UP ").append(formatBytes(lastTxBytes))
+                        .append(" | Total DOWN ").append(formatBytes(lastRxBytes));
+            }
+            if (notificationStatusText != null && !notificationStatusText.isEmpty()) {
+                big.append("\n").append(notificationStatusText);
+            }
+            style.bigText(big.toString());
+        } else {
+            style.bigText(text);
+        }
+
+        Intent openIntent = new Intent(this, MainActivity.class);
+        openIntent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        PendingIntent contentIntent = PendingIntent.getActivity(
+                this,
+                1,
+                openIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+        );
+
         return new Notification.Builder(this, CHANNEL_ID)
-                .setContentTitle("NanFang VPN")
-                .setContentText(text)
+                .setContentTitle(title)
+                .setContentText(contentText)
+                .setStyle(style)
                 .setSmallIcon(android.R.drawable.ic_lock_lock)
+                .setOnlyAlertOnce(true)
+                .setShowWhen(false)
                 .setOngoing(true)
+                .setContentIntent(contentIntent)
                 .build();
     }
 
     private void updateNotification(String text) {
+        notificationStatusText = text;
+        updateNotificationInternal(false);
+    }
+
+    private void updateNotificationWithTraffic() {
+        updateNotificationInternal(true);
+    }
+
+    private void updateNotificationInternal(boolean preferTrafficText) {
         NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
         if (nm != null) {
-            nm.notify(1, buildNotification(text));
+            nm.notify(1, buildNotification(notificationStatusText, preferTrafficText));
+        }
+    }
+
+    private void resetTrafficStats() {
+        lastTrafficSampleAt = 0L;
+        lastTxBytes = -1L;
+        lastRxBytes = -1L;
+        lastUpBytesPerSec = 0L;
+        lastDownBytesPerSec = 0L;
+    }
+
+    private void recordTrafficSnapshot(String traffic) {
+        TrafficSnapshot snapshot = parseTrafficSnapshot(traffic);
+        if (snapshot == null) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        if (lastTxBytes >= 0L && lastRxBytes >= 0L && lastTrafficSampleAt > 0L && now > lastTrafficSampleAt) {
+            long deltaTx = snapshot.txBytes - lastTxBytes;
+            long deltaRx = snapshot.rxBytes - lastRxBytes;
+            long deltaMs = now - lastTrafficSampleAt;
+            if (deltaTx >= 0L && deltaRx >= 0L && deltaMs > 0L) {
+                lastUpBytesPerSec = (deltaTx * 1000L) / deltaMs;
+                lastDownBytesPerSec = (deltaRx * 1000L) / deltaMs;
+            } else {
+                lastUpBytesPerSec = 0L;
+                lastDownBytesPerSec = 0L;
+            }
+        }
+        lastTxBytes = snapshot.txBytes;
+        lastRxBytes = snapshot.rxBytes;
+        lastTrafficSampleAt = now;
+    }
+
+    private TrafficSnapshot parseTrafficSnapshot(String traffic) {
+        if (traffic == null) {
+            return null;
+        }
+        String trimmed = traffic.trim();
+        if (trimmed.isEmpty()) {
+            return null;
+        }
+        try {
+            if (trimmed.startsWith("{")) {
+                JSONObject obj = new JSONObject(trimmed);
+                Long tx = findLong(obj, "tx", "upload", "up", "sent");
+                Long rx = findLong(obj, "rx", "download", "down", "recv", "received");
+                if (tx != null && rx != null) {
+                    return new TrafficSnapshot(tx, rx);
+                }
+            }
+        } catch (Exception e) {
+            dbgErr("parseTrafficSnapshot json failed", e);
+        }
+
+        String compact = trimmed.replace(" ", "");
+        String[] parts = compact.split(",");
+        if (parts.length >= 2) {
+            Long tx = tryParseLong(parts[0]);
+            Long rx = tryParseLong(parts[1]);
+            if (tx != null && rx != null) {
+                return new TrafficSnapshot(tx, rx);
+            }
+        }
+
+        Long tx = extractLabeledLong(trimmed, "tx", "upload", "up", "sent");
+        Long rx = extractLabeledLong(trimmed, "rx", "download", "down", "recv", "received");
+        if (tx != null && rx != null) {
+            return new TrafficSnapshot(tx, rx);
+        }
+        return null;
+    }
+
+    private Long findLong(JSONObject obj, String... keys) {
+        for (String key : keys) {
+            if (!obj.has(key)) {
+                continue;
+            }
+            try {
+                Object value = obj.get(key);
+                if (value instanceof Number) {
+                    return ((Number) value).longValue();
+                }
+                Long parsed = tryParseLong(String.valueOf(value));
+                if (parsed != null) {
+                    return parsed;
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        return null;
+    }
+
+    private Long extractLabeledLong(String text, String... labels) {
+        for (String label : labels) {
+            Pattern pattern = Pattern.compile("(?i)" + Pattern.quote(label) + "\\s*[:=]?\\s*(\\d+)");
+            Matcher matcher = pattern.matcher(text);
+            if (matcher.find()) {
+                return tryParseLong(matcher.group(1));
+            }
+        }
+        return null;
+    }
+
+    private Long tryParseLong(String value) {
+        if (value == null) {
+            return null;
+        }
+        String trimmed = value.trim();
+        if (trimmed.isEmpty()) {
+            return null;
+        }
+        for (int i = 0; i < trimmed.length(); i++) {
+            char ch = trimmed.charAt(i);
+            if (ch < '0' || ch > '9') {
+                return null;
+            }
+        }
+        try {
+            return Long.parseLong(trimmed);
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private String formatRate(long bytesPerSec) {
+        return formatBytes(bytesPerSec) + "/s";
+    }
+
+    private String formatBytes(long bytes) {
+        if (bytes < 0L) {
+            return "0 B";
+        }
+        double value = bytes;
+        String[] units = new String[]{"B", "KB", "MB", "GB", "TB"};
+        int unitIndex = 0;
+        while (value >= 1024.0d && unitIndex < units.length - 1) {
+            value /= 1024.0d;
+            unitIndex++;
+        }
+        if (unitIndex == 0) {
+            return String.format(Locale.US, "%.0f %s", value, units[unitIndex]);
+        }
+        if (value >= 100.0d) {
+            return String.format(Locale.US, "%.0f %s", value, units[unitIndex]);
+        }
+        if (value >= 10.0d) {
+            return String.format(Locale.US, "%.1f %s", value, units[unitIndex]);
+        }
+        return String.format(Locale.US, "%.2f %s", value, units[unitIndex]);
+    }
+
+    private static final class TrafficSnapshot {
+        final long txBytes;
+        final long rxBytes;
+
+        TrafficSnapshot(long txBytes, long rxBytes) {
+            this.txBytes = txBytes;
+            this.rxBytes = rxBytes;
         }
     }
 
     private boolean startVpnFromSelectedNode(String state, String notification, boolean stopSelfOnFailure) {
         synchronized (lifecycleLock) {
             publishStatus(state, activeNodeId, null, null);
+            resetTrafficStats();
+            updateNotification(notification);
             try {
                 File nodesFile = new File(getFilesDir(), NODES_FILE);
                 if (!nodesFile.exists()) {
@@ -251,6 +467,7 @@ public class VpnService extends android.net.VpnService implements SocketProtecto
 
                 running = true;
                 activeNodeId = config.optInt("node_id", -1);
+                resetTrafficStats();
                 persistVpnState(true, activeNodeId, STATE_CONNECTED);
                 updateNotification("VPN connected");
                 startStatsLoop();
@@ -275,6 +492,8 @@ public class VpnService extends android.net.VpnService implements SocketProtecto
     private void handleSwitchRequest() {
         synchronized (lifecycleLock) {
             publishStatus(STATE_SWITCHING, activeNodeId, null, null);
+            resetTrafficStats();
+            updateNotification("VPN switching...");
             try {
                 File nodesFile = new File(getFilesDir(), NODES_FILE);
                 JSONObject selectedNode = readSelectedNode(nodesFile);
@@ -282,34 +501,22 @@ public class VpnService extends android.net.VpnService implements SocketProtecto
                 JSONObject config = buildNanoCoreConfig(selectedNode, nanoDir, detachedTunFd);
                 int newNodeId = config.optInt("node_id", -1);
                 dbg("SWITCH request node_id=" + newNodeId + " type=" + config.optString("type"));
-                boolean switched = false;
-                try {
-                    switched = NanoCore.switchNode(config.toString());
-                } catch (Exception e) {
-                    dbgErr("NanoCore.switchNode threw", e);
-                }
-                if (!switched) {
-                    dbg("SWITCH direct failed; restarting core with current TUN");
-                    try {
-                        NanoCore.stopService();
-                    } catch (Exception e) {
-                        dbgErr("NanoCore.stopService before switch restart failed", e);
+                dbg("SWITCH forcing core restart on current TUN");
+                if (!restartCoreOnCurrentTun(config, "switch")) {
+                    dbg("SWITCH current TUN restart failed; rebuilding VPN");
+                    cleanupVpnResources();
+                    if (!startVpnFromSelectedNode(STATE_SWITCHING, "VPN switching...", false)) {
+                        throw new IllegalStateException("switch rebuild returned false");
                     }
-                    Thread.sleep(250);
-                    if (!NanoCore.startService(config.toString(), 50)) {
-                        dbg("SWITCH current TUN restart failed; rebuilding VPN");
-                        cleanupVpnResources();
-                        if (!startVpnFromSelectedNode(STATE_SWITCHING, "VPN switching...", false)) {
-                            throw new IllegalStateException("switch rebuild returned false");
-                        }
-                        return;
-                    }
+                    return;
                 }
                 running = true;
                 activeNodeId = newNodeId;
+                resetTrafficStats();
                 persistVpnState(true, activeNodeId, STATE_CONNECTED);
-                updateNotification(switched ? "VPN switched" : "VPN restarted on new node");
-                dbg("SWITCH success node_id=" + activeNodeId + " direct=" + switched);
+                ignoreNetworkEventsUntil = System.currentTimeMillis() + 1500L;
+                updateNotification("VPN switched");
+                dbg("SWITCH success node_id=" + activeNodeId + " direct=false forced_restart=true");
                 publishStatus(STATE_CONNECTED, activeNodeId, null, null);
             } catch (Exception e) {
                 dbgErr("SWITCH failed", e);
@@ -416,6 +623,7 @@ public class VpnService extends android.net.VpnService implements SocketProtecto
         running = false;
         stopNetworkCallback();
         stopStatsLoop();
+        resetTrafficStats();
         try {
             NanoCore.stopService();
         } catch (Exception e) {
@@ -447,7 +655,8 @@ public class VpnService extends android.net.VpnService implements SocketProtecto
                     String traffic = NanoCore.getTraffic();
                     String status = NanoCore.status();
                     dbg("stats traffic=" + traffic + " status=" + status);
-                    updateNotification("VPN connected");
+                    recordTrafficSnapshot(traffic);
+                    updateNotificationWithTraffic();
                     if (running && STATE_CONNECTED.equals(currentState)) {
                         publishStatus(STATE_CONNECTED, activeNodeId, null, traffic);
                     }
@@ -455,7 +664,7 @@ public class VpnService extends android.net.VpnService implements SocketProtecto
                     dbgErr("stats loop failed", e);
                 }
                 try {
-                    Thread.sleep(5000);
+                    Thread.sleep(1000);
                 } catch (InterruptedException ignored) {
                     return;
                 }
@@ -584,6 +793,7 @@ public class VpnService extends android.net.VpnService implements SocketProtecto
                     }
                 }
                 activeNodeId = config.optInt("node_id", activeNodeId);
+                resetTrafficStats();
                 persistVpnState(true, activeNodeId, STATE_CONNECTED);
                 updateNotification("VPN connected");
                 publishStatus(STATE_CONNECTED, activeNodeId, null, null);
@@ -1026,6 +1236,24 @@ public class VpnService extends android.net.VpnService implements SocketProtecto
             }
             return out.toString("UTF-8");
         }
+    }
+
+    private boolean restartCoreOnCurrentTun(JSONObject config, String reason) {
+        try {
+            NanoCore.stopService();
+        } catch (Exception e) {
+            dbgErr("NanoCore.stopService before restart failed reason=" + reason, e);
+        }
+        try {
+            Thread.sleep(250);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+        boolean started = NanoCore.startService(config.toString(), 50);
+        dbg("restartCoreOnCurrentTun reason=" + reason + " started=" + started
+                + " node_id=" + config.optInt("node_id", -1));
+        return started;
     }
 
     private void publishStatus(String state, int nodeId, String error, String traffic) {

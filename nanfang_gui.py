@@ -27,6 +27,7 @@ SETTINGS_FILE = os.path.join(BASE_DIR, "settings.json")
 PROXY_PORT = 7890  # nanfang mixed proxy port (HTTP CONNECT + SOCKS5)
 PROXY_KEY = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
 DEBUG_LOG = os.path.join(BASE_DIR, "debug.log")
+CORE_LOG = os.path.join(BASE_DIR, "core.log")
 CNCIDR_FILE = os.path.join(BASE_DIR, "cncidr-v4-12.txt")
 PAC_FILE = os.path.join(BASE_DIR, "nanfang_proxy.pac")
 
@@ -122,6 +123,31 @@ def set_system_proxy(host, port):
         ctypes.windll.wininet.InternetSetOptionW(0, 37, 0, 0)
     except Exception as e:
         print(f"set proxy error: {e}")
+
+
+def _is_port_available(port):
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", int(port)))
+            return True
+    except OSError:
+        return False
+
+
+def _find_available_proxy_port(preferred=PROXY_PORT):
+    preferred = int(preferred)
+    candidates = [preferred] + list(range(preferred + 1, preferred + 101))
+    for port in candidates:
+        if _is_port_available(port):
+            if port != preferred:
+                log_debug(f"proxy port {preferred} is busy, using {port}")
+            return port
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    log_debug(f"proxy port range busy, using ephemeral {port}")
+    return port
+
 
 
 def _domain_pac_condition(domains):
@@ -765,6 +791,8 @@ class NanfangApp:
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self.process = None
+        self.core_log_file = None
+        self.proxy_port = PROXY_PORT
         self.nodes = []
         self.selected_idx = 0
         self.current_mode = None
@@ -978,7 +1006,7 @@ class NanfangApp:
                     try:
                         t0 = time.time()
                         # SOCKS5 connect to httpbin.org:80
-                        s = _sock.create_connection(("127.0.0.1", PROXY_PORT), timeout=3)
+                        s = _sock.create_connection(("127.0.0.1", self.proxy_port), timeout=3)
                         # SOCKS5 handshake: version=5, nmethods=1, method=0(no auth)
                         s.sendall(b"\x05\x01\x00")
                         s.settimeout(3)
@@ -1079,6 +1107,10 @@ class NanfangApp:
             return False
 
         self._stop_nanfang()
+        if mode == "system_proxy":
+            self.proxy_port = _find_available_proxy_port(PROXY_PORT)
+        else:
+            self.proxy_port = PROXY_PORT
 
         idx = max(0, min(self.selected_idx, len(self.nodes) - 1))
         selected_nodes_file, node = self._write_selected_node_file()
@@ -1090,15 +1122,19 @@ class NanfangApp:
 
         try:
             cmd = [core_exe, "serve", "--nodes-file", selected_nodes_file,
-                   "--node-id", str(node_id), "--listen", f"127.0.0.1:{PROXY_PORT}"]
+                   "--node-id", str(node_id), "--listen", f"127.0.0.1:{self.proxy_port}"]
             with open(os.path.join(BASE_DIR, "debug.log"), "a", encoding="utf-8") as f:
                 f.write(f"[{time.strftime('%H:%M:%S')}] Starting: {' '.join(cmd)}\n")
             # Use STARTUPINFO to hide the console window without CREATE_NO_WINDOW
             si = subprocess.STARTUPINFO()
             si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             si.wShowWindow = 0  # SW_HIDE
+            self._close_core_log_file()
+            self.core_log_file = open(CORE_LOG, "a", encoding="utf-8", errors="replace")
+            self.core_log_file.write(f"\n[{time.strftime('%H:%M:%S')}] {' '.join(cmd)}\n")
+            self.core_log_file.flush()
             self.process = subprocess.Popen(
-                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                cmd, stdout=self.core_log_file, stderr=subprocess.STDOUT,
                 startupinfo=si, cwd=BASE_DIR, creationflags=CREATE_NO_WINDOW,
             )
             with open(os.path.join(BASE_DIR, "debug.log"), "a", encoding="utf-8") as f:
@@ -1111,17 +1147,39 @@ class NanfangApp:
 
         return True
 
+    def _close_core_log_file(self):
+        if self.core_log_file:
+            try:
+                self.core_log_file.close()
+            except Exception:
+                pass
+            self.core_log_file = None
+
+    def _tail_core_log(self, max_chars=1200):
+        try:
+            if not os.path.exists(CORE_LOG):
+                return ""
+            with open(CORE_LOG, "r", encoding="utf-8", errors="replace") as f:
+                data = f.read()
+            return data[-max_chars:].strip()
+        except Exception:
+            return ""
+
     def _check_nanfang_alive(self):
         """Check if nanfang is still running. Call after a short delay."""
         if self.process and self.process.poll() is not None:
             code = self.process.returncode
+            core_tail = self._tail_core_log()
             with open(os.path.join(BASE_DIR, "debug.log"), "a", encoding="utf-8") as f:
-                f.write(f"[{time.strftime('%H:%M:%S')}] Process DIED, exit code={code}\n")
+                f.write(f"[{time.strftime('%H:%M:%S')}] Process DIED, exit code={code}\n{core_tail}\n")
             self.process = None
+            self._close_core_log_file()
             self._stop()
-            messagebox.showerror("错误", f"nanfang 启动失败 (exit code: {code})")
+            detail = f"\n{core_tail[-500:]}" if core_tail else ""
+            messagebox.showerror("??", f"nanfang ???? (exit code: {code}){detail}")
             return False
         return True
+
 
     def _stop_nanfang(self):
         if self.process:
@@ -1131,6 +1189,7 @@ class NanfangApp:
             except:
                 self.process.kill()
             self.process = None
+            self._close_core_log_file()
             # Give wintun driver time to clean up adapter state
             time.sleep(1)
 
@@ -1228,12 +1287,12 @@ class NanfangApp:
                 self._set_buttons_idle()
                 return
             # nanfang is alive, set proxy
-            set_system_pac("127.0.0.1", PROXY_PORT)
+            set_system_pac("127.0.0.1", self.proxy_port)
             self.current_mode = "system_proxy"
             self._set_buttons_idle()
-            self.info_var.set(f"系统代理已开启 | {name} | 127.0.0.1:{PROXY_PORT}")
+            self.info_var.set(f"系统代理已开启 | {name} | 127.0.0.1:{self.proxy_port}")
             self.status_dot.set_color(ACCENT_GREEN)
-            self.ticker.set_status(f"● 系统代理运行中 — 127.0.0.1:{PROXY_PORT}", ACCENT_GREEN)
+            self.ticker.set_status(f"● 系统代理运行中 — 127.0.0.1:{self.proxy_port}", ACCENT_GREEN)
 
         self.root.after(1500, _after_delay)
 
@@ -1247,15 +1306,19 @@ class NanfangApp:
 
         try:
             cmd = [get_core_exe(), "serve", "--nodes-file", selected_nodes_file,
-                   "--node-id", str(node_id), "--listen", f"127.0.0.1:{PROXY_PORT}"]
+                   "--node-id", str(node_id), "--listen", f"127.0.0.1:{self.proxy_port}"]
             si = subprocess.STARTUPINFO()
             si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             si.wShowWindow = 0
+            self._close_core_log_file()
+            self.core_log_file = open(CORE_LOG, "a", encoding="utf-8", errors="replace")
+            self.core_log_file.write(f"\n[{time.strftime('%H:%M:%S')}] {' '.join(cmd)}\n")
+            self.core_log_file.flush()
             self.process = subprocess.Popen(
-                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                cmd, stdout=self.core_log_file, stderr=subprocess.STDOUT,
                 startupinfo=si, cwd=BASE_DIR, creationflags=CREATE_NO_WINDOW,
             )
-            self.info_var.set(f"已切换: {name} (ID:{node_id}) | 127.0.0.1:{PROXY_PORT}")
+            self.info_var.set(f"已切换: {name} (ID:{node_id}) | 127.0.0.1:{self.proxy_port}")
         except Exception as e:
             self.info_var.set(f"切换失败: {e}")
 
@@ -1316,6 +1379,7 @@ class NanfangApp:
     def _stop(self):
         was_tun = self.current_mode == "tun"
         self._stop_nanfang()
+        self._close_core_log_file()
         clear_system_proxy()
         if was_tun:
             self._cleanup_tun_routes()
