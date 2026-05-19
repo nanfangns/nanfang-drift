@@ -8,7 +8,7 @@ import (
 	"strconv"
 )
 
-const version = "1.0.0"
+const version = "1.0.6"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -35,7 +35,7 @@ func main() {
 }
 
 func printUsage() {
-	fmt.Println(`nanfang v1.0.0 - aero_v2 proxy client
+	fmt.Println(`nanfang v1.0.6 - aero_v2 proxy client
 
 Usage:
   nanfang serve [options]     Start SOCKS5/HTTP proxy server
