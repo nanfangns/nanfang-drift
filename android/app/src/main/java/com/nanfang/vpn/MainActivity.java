@@ -178,10 +178,12 @@ public class MainActivity extends Activity {
             }
         });
 
-        // Restore saved nodes
+        // Restore saved nodes or load from assets
         String saved = prefs.getString("nodes", "");
         if (!saved.isEmpty()) {
             loadNodesUI(saved);
+        } else {
+            loadNodesFromAssets();
         }
         lastObservedSelectedNodeId = getSelectedNodeId();
         syncVpnState();
@@ -296,31 +298,7 @@ public class MainActivity extends Activity {
         if (!url.contains("/api/v1/client/subscribe")) {
             return url;
         }
-        StringBuilder out = new StringBuilder(url);
-        appendQueryIfMissing(out, url, "flag", "aero");
-        appendQueryIfMissing(out, out.toString(), "tz", "8");
-        appendQueryIfMissing(out, out.toString(), "lang", "zh_CN");
-        appendQueryIfMissing(out, out.toString(), "skip_srs", "1");
-        return out.toString();
-    }
-
-    private void appendQueryIfMissing(StringBuilder out, String url, String key, String value) {
-        if (hasQueryParam(url, key)) {
-            return;
-        }
-        out.append(out.indexOf("?") >= 0 ? "&" : "?");
-        out.append(key).append("=").append(value);
-    }
-
-    private boolean hasQueryParam(String url, String key) {
-        String lower = url.toLowerCase(java.util.Locale.ROOT);
-        String target = key.toLowerCase(java.util.Locale.ROOT) + "=";
-        int query = lower.indexOf('?');
-        if (query < 0) {
-            return false;
-        }
-        String q = lower.substring(query + 1);
-        return q.startsWith(target) || q.contains("&" + target);
+        return url;
     }
 
     private String normalizeNodesJson(String json) throws Exception {
@@ -370,6 +348,24 @@ public class MainActivity extends Activity {
         } catch (Exception e) {
             suppressSelectionCallback = false;
             Toast.makeText(this, "Parse error: " + e.getMessage(), Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void loadNodesFromAssets() {
+        try {
+            InputStream is = getAssets().open("nodes.json");
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = is.read(buf)) > 0) {
+                baos.write(buf, 0, n);
+            }
+            is.close();
+            String json = baos.toString("UTF-8");
+            dbg("loadNodesFromAssets size=" + json.length());
+            loadNodesUI(json);
+        } catch (Exception e) {
+            dbgErr("loadNodesFromAssets fail", e);
         }
     }
 
