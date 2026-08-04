@@ -10,25 +10,29 @@ import (
 )
 
 type SubscriptionResponse struct {
-	NodeID       int    `json:"node_id"`
-	Name         string `json:"name"`
-	Server       string `json:"server"`
-	ServerPort   int    `json:"server_port"`
-	ServerIP     string `json:"server_ip"`
-	Type         string `json:"type"`
-	Password     string `json:"password"`
-	EdgePSK      string `json:"aero_v2_edge_psk"`
-	AEADKey      string `json:"aero_v2_aead_key"`
-	AuthID       int    `json:"auth_id"`
-	UDPPort      int    `json:"udp_port"`
-	MTU          int    `json:"mtu"`
-	IPLCMode     bool   `json:"iplc_mode"`
-	UDPLaneMode  string `json:"udp_lane_mode"`
-	SNI          string `json:"sni"`
-	PoolSize     int    `json:"pool_size"`
-	ResumeTicket string `json:"aero_v2_resume_ticket,omitempty"`
+	NodeID        int    `json:"node_id"`
+	Name          string `json:"name"`
+	Server        string `json:"server"`
+	ServerPort    int    `json:"server_port"`
+	ServerIP      string `json:"server_ip"`
+	Type          string `json:"type"`
+	Password      string `json:"password"`
+	EdgePSK       string `json:"aero_v2_edge_psk"`
+	AEADKey       string `json:"aero_v2_aead_key"`
+	AuthID        int    `json:"auth_id"`
+	UDPPort       int    `json:"udp_port"`
+	MTU           int    `json:"mtu"`
+	IPLCMode      bool   `json:"iplc_mode"`
+	UDPLaneMode   string `json:"udp_lane_mode"`
+	SNI           string `json:"sni"`
+	PoolSize      int    `json:"pool_size"`
+	ResumeTicket  string `json:"aero_v2_resume_ticket,omitempty"`
 	ResumeTicket2 string `json:"resume_ticket,omitempty"`
-	ResumeTTLSec int    `json:"resume_ttl_sec,omitempty"`
+	ResumeTTLSec  int    `json:"resume_ttl_sec,omitempty"`
+	// honey_pot_wss transport fields
+	Transport  string `json:"aero_v2_transport,omitempty"`
+	CarrierSNI string `json:"aero_v2_carrier_sni,omitempty"`
+	WSPath     string `json:"aero_v2_ws_path,omitempty"`
 }
 
 type SubscriptionInfo struct {
@@ -103,6 +107,9 @@ func FetchSubscription(rawURL string) ([]AeroNode, error) {
 			SNI:          rn.SNI,
 			PoolSize:     rn.PoolSize,
 			Name:         rn.Name,
+			Transport:    rn.Transport,
+			CarrierSNI:   rn.CarrierSNI,
+			WSPath:       rn.WSPath,
 		})
 	}
 

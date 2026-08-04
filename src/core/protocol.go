@@ -38,6 +38,10 @@ type AeroNode struct {
 	SNI          string `json:"sni,omitempty"`
 	PoolSize     int    `json:"pool_size,omitempty"`
 	Name         string `json:"name"`
+	// honey_pot_wss transport fields
+	Transport  string `json:"aero_v2_transport,omitempty"`
+	CarrierSNI string `json:"aero_v2_carrier_sni,omitempty"`
+	WSPath     string `json:"aero_v2_ws_path,omitempty"`
 }
 
 func sha256Prefix16(s string) []byte {
@@ -181,7 +185,9 @@ func (t *AeroTunnel) SetDeadline(d time.Time) error       { return t.conn.SetDea
 func (t *AeroTunnel) SetReadDeadline(d time.Time) error   { return t.conn.SetReadDeadline(d) }
 func (t *AeroTunnel) SetWriteDeadline(d time.Time) error  { return t.conn.SetWriteDeadline(d) }
 
-func OpenAeroTunnel(node *AeroNode, targetHost string, targetPort int) (net.Conn, error) {
+// --- Legacy raw TCP transport ---
+
+func openAeroTunnelRaw(node *AeroNode, targetHost string, targetPort int) (net.Conn, error) {
 	conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", node.Server, node.Port), 10*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("dial: %w", err)
@@ -207,4 +213,10 @@ func OpenAeroTunnel(node *AeroNode, targetHost string, targetPort int) (net.Conn
 
 	conn.SetDeadline(time.Time{})
 	return &AeroTunnel{conn: conn}, nil
+}
+
+// OpenAeroTunnel establishes a tunnel to the target through the aero_v2 node.
+// It uses the raw TCP aero_v2 protocol (custom TLS ClientHello with AC2 extension).
+func OpenAeroTunnel(node *AeroNode, targetHost string, targetPort int) (net.Conn, error) {
+	return openAeroTunnelRaw(node, targetHost, targetPort)
 }
