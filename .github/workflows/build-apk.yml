@@ -104,6 +104,14 @@ jobs:
             -d "$BUILD/dex" \
             $SRC_FILES $GEN_FILES
 
+          # Pack classes into jar and run d8
+          echo "Running d8..."
+          cd "$BUILD"
+          jar cf classes.jar -C dex .
+          mkdir -p dex_out
+          "$D8" --output dex_out --lib "$PLAT" --min-api 21 classes.jar "$AAR_DIR/nanfang.aar"
+          cd "${{ github.workspace }}"
+
           # Inject classes.dex
           mkdir -p "$BUILD/apk"
           cp "$BUILD/dex_out/classes.dex" "$BUILD/apk/"
