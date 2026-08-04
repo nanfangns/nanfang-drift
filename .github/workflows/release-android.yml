@@ -32,11 +32,12 @@ jobs:
 
       - name: Build AAR
         run: |
+          mkdir -p ${{ github.workspace }}/android
           gomobile bind \
             -v \
             -target=android \
             -androidapi 21 \
-            -o ../android/nanfang.aar \
+            -o ${{ github.workspace }}/android/nanfang.aar \
             -javapkg com.nanfang.vpn \
             ./
         working-directory: src/mobile
