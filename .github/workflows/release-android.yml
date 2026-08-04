@@ -1,0 +1,186 @@
+name: Release Android APK
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache-dependency-path: src/go.sum
+
+      - name: Install gomobile
+        run: go install golang.org/x/mobile/cmd/gomobile@latest
+
+      - name: Add mobile dep
+        working-directory: src
+        run: |
+          go get -tool golang.org/x/mobile/cmd/gobind
+          go mod tidy
+
+      - name: Initialize gomobile
+        working-directory: src
+        run: gomobile init
+
+      - name: Build AAR (Go → Android native lib)
+        working-directory: src/mobile
+        run: |
+          mkdir -p ${{ github.workspace }}/build/aar
+          gomobile bind \
+            -v \
+            -target=android \
+            -androidapi 21 \
+            -o ${{ github.workspace }}/build/aar/nanfang.aar \
+            -javapkg com.nanfang.vpn \
+            ./
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build APK
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_SDK_ROOT }}
+        run: |
+          SDK="$ANDROID_HOME"
+          BT="$SDK/build-tools/34.0.0"
+          AAPT2="$BT/aapt2"
+          D8="$BT/d8"
+          ZIPALIGN="$BT/zipalign"
+          PLAT="$SDK/platforms/android-34/android.jar"
+          PROJ="android/app/src/main"
+          BUILD="${{ github.workspace }}/build"
+          AAR_DIR="$BUILD/aar"
+
+          # Extract classes.jar from AAR
+          unzip -o "$AAR_DIR/nanfang.aar" classes.jar -d "$AAR_DIR/extracted"
+
+          # Compile Java sources
+          echo "Compiling Java..."
+          SRC_FILES=$(find "$PROJ/java" -name "*.java")
+          mkdir -p "$BUILD/dex"
+          javac -encoding UTF-8 \
+            -classpath "$PLAT:$AAR_DIR/extracted/classes.jar" \
+            -d "$BUILD/dex" \
+            $SRC_FILES
+
+          # Pack classes into jar and run d8
+          echo "Running d8..."
+          cd "$BUILD"
+          jar cf classes.jar -C dex .
+          mkdir -p dex_out
+          "$D8" --output dex_out --lib "$PLAT" --min-api 21 classes.jar "$AAR_DIR/nanfang.aar"
+          cd "${{ github.workspace }}"
+
+          # Compile resources via aapt2
+          echo "Compiling resources..."
+          mkdir -p "$BUILD/obj"
+          for f in $(find "$PROJ/res" -type f); do
+            "$AAPT2" compile -o "$BUILD/obj/" "$f"
+          done
+
+          # Link resources
+          echo "Linking resources..."
+          FLATS=$(ls "$BUILD/obj/"*.flat 2>/dev/null | tr '\n' ' ')
+          "$AAPT2" link \
+            -o "$BUILD/app.unsigned.apk" \
+            -I "$PLAT" \
+            --manifest "$PROJ/AndroidManifest.xml" \
+            --auto-add-overlay \
+            $FLATS
+
+          # Inject classes.dex
+          mkdir -p "$BUILD/apk"
+          cp "$BUILD/dex_out/classes.dex" "$BUILD/apk/"
+
+          # Extract native libs from AAR
+          echo "Extracting native libs..."
+          unzip -o "$AAR_DIR/nanfang.aar" "jni/*" -d "$BUILD/aar_extract"
+          if [ -d "$BUILD/aar_extract/jni" ]; then
+            mkdir -p "$BUILD/apk/lib"
+            cp -r "$BUILD/aar_extract/jni/"* "$BUILD/apk/lib/"
+          fi
+
+          # Copy official nanocore libs
+          echo "Copying official libs..."
+          for abi in arm64-v8a armeabi-v7a; do
+            if [ -f "android/official-libs/$abi/libnanocore.so" ]; then
+              mkdir -p "$BUILD/apk/lib/$abi"
+              cp "android/official-libs/$abi/libnanocore.so" "$BUILD/apk/lib/$abi/"
+            fi
+          done
+
+          # Assemble APK
+          echo "Assembling APK..."
+          python3 -c "
+import zipfile, os
+src = '$BUILD/app.unsigned.apk'
+out = '$BUILD/app.apk'
+with zipfile.ZipFile(src, 'r') as zin:
+    with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            zout.writestr(item, zin.read(item))
+        dex = '$BUILD/apk/classes.dex'
+        if os.path.exists(dex):
+            zout.write(dex, 'classes.dex')
+        for root, dirs, files in os.walk('$BUILD/apk'):
+            for f in files:
+                if f == 'classes.dex':
+                    continue
+                full = os.path.join(root, f)
+                arc = os.path.relpath(full, '$BUILD/apk').replace(os.sep, '/')
+                if arc.startswith('lib/'):
+                    zout.write(full, arc)
+print('APK assembled')
+"
+
+          # Zipalign
+          echo "Zipalign..."
+          "$ZIPALIGN" -f 4 "$BUILD/app.apk" "$BUILD/app-aligned.apk"
+
+          # Sign with debug key
+          echo "Signing..."
+          KEYSTORE="$BUILD/debug.keystore"
+          keytool -genkey -v -keystore "$KEYSTORE" \
+            -storepass android -alias androiddebugkey \
+            -keypass android -keyalg RSA -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US" 2>/dev/null
+          "$BT/apksigner" sign \
+            --ks "$KEYSTORE" --ks-pass pass:android \
+            --key-pass pass:android \
+            --ks-key-alias androiddebugkey \
+            "$BUILD/app-aligned.apk"
+
+          cp "$BUILD/app-aligned.apk" "${{ github.workspace }}/nanfang-vpn.apk"
+          echo "APK: $(ls -lh nanfang-vpn.apk | awk '{print $5}')"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nanfang-vpn-android
+          path: nanfang-vpn.apk
+
+      - name: Publish APK to Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: nanfang-vpn.apk
