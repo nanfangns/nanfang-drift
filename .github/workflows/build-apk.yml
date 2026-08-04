@@ -39,7 +39,6 @@ jobs:
             -target=android \
             -androidapi 21 \
             -o ${{ github.workspace }}/build/aar/nanfang.aar \
-            -javapkg com.nanfang.vpn \
             ./
 
       - name: Set up Java 17
