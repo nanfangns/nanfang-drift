@@ -73,23 +73,6 @@ jobs:
           # Extract classes.jar from AAR
           unzip -o "$AAR_DIR/nanfang.aar" classes.jar -d "$AAR_DIR/extracted"
 
-          # Compile Java sources
-          echo "Compiling Java..."
-          SRC_FILES=$(find "$PROJ/java" -name "*.java")
-          mkdir -p "$BUILD/dex"
-          javac -encoding UTF-8 \
-            -classpath "$PLAT:$AAR_DIR/extracted/classes.jar" \
-            -d "$BUILD/dex" \
-            $SRC_FILES
-
-          # Pack classes into jar and run d8
-          echo "Running d8..."
-          cd "$BUILD"
-          jar cf classes.jar -C dex .
-          mkdir -p dex_out
-          "$D8" --output dex_out --lib "$PLAT" --min-api 21 classes.jar "$AAR_DIR/nanfang.aar"
-          cd "${{ github.workspace }}"
-
           # Compile resources via aapt2
           echo "Compiling resources..."
           mkdir -p "$BUILD/obj"
@@ -97,15 +80,30 @@ jobs:
             "$AAPT2" compile -o "$BUILD/obj/" "$f"
           done
 
-          # Link resources
+          # Link resources (generates R.java + unsigned APK)
           echo "Linking resources..."
           FLATS=$(ls "$BUILD/obj/"*.flat 2>/dev/null | tr '\n' ' ')
+          mkdir -p "$BUILD/gen"
           "$AAPT2" link \
             -o "$BUILD/app.unsigned.apk" \
             -I "$PLAT" \
             --manifest "$PROJ/AndroidManifest.xml" \
+            --java "$BUILD/gen" \
             --auto-add-overlay \
             $FLATS
+
+          # Extract classes.jar from AAR
+          unzip -o "$AAR_DIR/nanfang.aar" classes.jar -d "$AAR_DIR/extracted"
+
+          # Compile Java sources (including generated R.java)
+          echo "Compiling Java..."
+          SRC_FILES=$(find "$PROJ/java" -name "*.java")
+          GEN_FILES=$(find "$BUILD/gen" -name "*.java" 2>/dev/null)
+          mkdir -p "$BUILD/dex"
+          javac -encoding UTF-8 \
+            -classpath "$PLAT:$AAR_DIR/extracted/classes.jar" \
+            -d "$BUILD/dex" \
+            $SRC_FILES $GEN_FILES
 
           # Inject classes.dex
           mkdir -p "$BUILD/apk"
