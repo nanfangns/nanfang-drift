@@ -128,29 +128,18 @@ jobs:
             fi
           done
 
-          # Assemble APK
+          # Assemble APK: inject classes.dex and native libs into unsigned APK
           echo "Assembling APK..."
-          python3 -c "
-import zipfile, os
-src = '$BUILD/app.unsigned.apk'
-out = '$BUILD/app.apk'
-with zipfile.ZipFile(src, 'r') as zin:
-    with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as zout:
-        for item in zin.infolist():
-            zout.writestr(item, zin.read(item))
-        dex = '$BUILD/apk/classes.dex'
-        if os.path.exists(dex):
-            zout.write(dex, 'classes.dex')
-        for root, dirs, files in os.walk('$BUILD/apk'):
-            for f in files:
-                if f == 'classes.dex':
-                    continue
-                full = os.path.join(root, f)
-                arc = os.path.relpath(full, '$BUILD/apk').replace(os.sep, '/')
-                if arc.startswith('lib/'):
-                    zout.write(full, arc)
-print('APK assembled')
-"
+          cp "$BUILD/app.unsigned.apk" "$BUILD/app.apk"
+          cd "$BUILD/apk"
+          # Add classes.dex
+          zip -q "$BUILD/app.apk" classes.dex
+          # Add native libs
+          find lib -type f 2>/dev/null | while read f; do
+            zip -q "$BUILD/app.apk" "$f"
+          done
+          cd "${{ github.workspace }}"
+          echo "APK assembled"
 
           # Zipalign
           echo "Zipalign..."
